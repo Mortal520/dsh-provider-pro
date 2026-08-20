@@ -1,0 +1,75 @@
+{
+  "name": "dsh-provider-pro",
+  "description": "Custom User-Agent + official-channel-style reasoning-level switching for custom providers · 自定义供应方 User-Agent 与官方同款推理等级切换统一开关。",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "license": "MIT",
+  "author": "kyo615",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kyo615/dsh-provider-pro.git"
+  },
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "user-agent",
+    "custom-provider",
+    "reasoning"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json && tsdown",
+    "check": "pnpm run typecheck && pnpm run build && node scripts/check-client-bundle.mjs",
+    "smoke": "node scripts/smoke-provider-pro.mjs",
+    "prepack": "npm run build",
+    "prepare": "npm run build"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@types/node": "^26.0.0",
+    "@types/react": "~18.3.1",
+    "react": "^18.3.1",
+    "tsdown": "^0.22.14",
+    "typescript": "^7.0.2"
+  }
+}

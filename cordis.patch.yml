@@ -1,0 +1,6 @@
+# dsh bundle patch: inserts this plugin into a profile's layer stack.
+#
+# The `name` must resolve to this package (package.json name) once installed.
+- insert:
+    - id: dsh-provider-pro
+      name: 'dsh-provider-pro'

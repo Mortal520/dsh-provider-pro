@@ -1,0 +1,20 @@
+# dependencies
+node_modules/
+
+# build cache
+*.tsbuildinfo
+
+# npm / pnpm artifacts
+*.tgz
+*.log
+.npmrc
+.pnpm-store/
+
+# editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# note: lib/ IS committed on purpose — it is the published build artifact
+# (README "构建" section), so a git install works without running build.

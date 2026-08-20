@@ -1,0 +1,44 @@
+/** Locale dictionaries for dsh-provider-pro's Settings → 模型增强 section. */
+export declare const zh: {
+    readonly nav: '模型增强';
+    readonly title: '模型增强';
+    readonly description: '自定义供应方的两个增强：请求级 User-Agent 覆盖，以及和官方渠道一样的模型推理等级切换（在聊天中直接切换，无需逐模型配置）。';
+    readonly refresh: '刷新';
+    readonly autoReasoning: '为全部自定义模型启用推理等级切换';
+    readonly autoReasoningHint: '开启（默认）：所有自定义模型在对话的模型选择器里出现完整推理等级，初始档位为「Default」（请求不带思考参数、由供应方决定），随时可在聊天里切换。关闭：移除自动补全的档位回到供应方默认；你自己手动设过的等级不受影响。';
+    readonly nsUnavailable: 'llm-pi-ai 命名空间不可用：当前组合未启用自定义供应方（模型页的“手动添加供应方”功能）。';
+    readonly loadFailed: '读取设置失败';
+    readonly noProviders: '还没有自定义供应方。请先在「设置 → 模型 → 手动添加」中创建一个供应方。';
+    readonly route: '路由';
+    readonly baseUrl: 'Base URL';
+    readonly userAgent: 'User-Agent';
+    readonly userAgentPlaceholder: '例如 Mozilla/5.0 (compatible; MyBot/1.0)';
+    readonly userAgentHint: '发往该供应方 baseURL 前缀的请求会带上这个 User-Agent（覆盖内置 attribution 头）；留空保存则清除覆盖。';
+    readonly resetUa: '清空';
+    readonly save: '保存';
+    readonly saving: '保存中…';
+    readonly saved: '已保存';
+    readonly saveFailed: '保存失败：';
+};
+export declare const en: {
+    readonly nav: 'Model Enhance';
+    readonly title: 'Model Enhance';
+    readonly description: 'Two upgrades for custom providers: a request-level User-Agent override, and official-channel-style reasoning-level switching (switched in the chat model picker — no per-model configuration needed).';
+    readonly refresh: 'Refresh';
+    readonly autoReasoning: 'Enable reasoning-level switching for all custom models';
+    readonly autoReasoningHint: 'On (default): every custom model shows the full reasoning-level set in the chat model picker, starting at "Default" (no thinking parameter sent; the provider decides) — switch any time in chat. Off: auto-filled levels are stripped back to provider defaults; levels you set manually are untouched.';
+    readonly nsUnavailable: 'The llm-pi-ai namespace is unavailable: this deployment does not compose custom providers.';
+    readonly loadFailed: 'Failed to load settings';
+    readonly noProviders: 'No custom providers yet. Create one under Settings → Models → custom provider.';
+    readonly route: 'Route';
+    readonly baseUrl: 'Base URL';
+    readonly userAgent: 'User-Agent';
+    readonly userAgentPlaceholder: 'e.g. Mozilla/5.0 (compatible; MyBot/1.0)';
+    readonly userAgentHint: 'Requests to this provider’s baseURL prefix carry this User-Agent (overriding the built-in attribution header). Empty + save clears the override.';
+    readonly resetUa: 'Clear';
+    readonly save: 'Save';
+    readonly saving: 'Saving…';
+    readonly saved: 'Saved';
+    readonly saveFailed: 'Save failed: ';
+};
+export type LocaleKey = keyof typeof zh | keyof typeof en;
