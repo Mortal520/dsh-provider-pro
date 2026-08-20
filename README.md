@@ -26,7 +26,7 @@ out of the box, with no per-model configuration.
 
 ```sh
 # 方式一：git 安装（需要一次构建许可，见下）
-dsh plugin --profile web add github:kyo615/dsh-provider-pro
+dsh plugin --profile web add github:Mortal520/dsh-provider-pro
 
 # 方式二：本地仓库 / tarball（免构建许可）
 dsh plugin --profile web add ./dsh-provider-pro
@@ -40,7 +40,7 @@ dsh plugin --profile web add ./dsh-provider-pro-0.1.0.tgz   # 先 pnpm pack
 >   dsh-provider-pro: true
 > ```
 > 然后重跑 `add`。这是对包内代码在你机器上执行的一次性授权——只允许可信来源，
-> 并建议锁定提交（`github:kyo615/dsh-provider-pro#<sha>`）。
+> 并建议锁定提交（`github:Mortal520/dsh-provider-pro#<sha>`）。
 >
 > 为避免该步骤，本仓库**已提交构建产物 `lib/`**，也可直接用 tarball/本地路径安装。
 
@@ -113,7 +113,7 @@ pnpm run smoke    # Host 行为冒烟（fetch 补丁 / 补档器 / 总开关）
 
 ```sh
 # git install (needs one build allow, see note)
-dsh plugin --profile web add github:kyo615/dsh-provider-pro
+dsh plugin --profile web add github:Mortal520/dsh-provider-pro
 
 # or a local checkout / tarball (no build permission needed)
 dsh plugin --profile web add ./dsh-provider-pro
@@ -124,7 +124,7 @@ dsh plugin --profile web add ./dsh-provider-pro-0.1.0.tgz   # after pnpm pack
 > you allow it: copy the package key pnpm prints into the profile's
 > `pnpm-workspace.yaml` (`allowBuilds: dsh-provider-pro: true`) and re-run
 > `add`. Only allow packages you trust — and preferable pin a commit
-> (`github:kyo615/dsh-provider-pro#<sha>`).
+> (`github:Mortal520/dsh-provider-pro#<sha>`).
 >
 > To avoid that step entirely, this repo commits its built `lib/`, and
 > tarball/local installs need no build permission at all.

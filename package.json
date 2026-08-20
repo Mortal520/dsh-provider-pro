@@ -6,10 +6,10 @@
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
   "license": "MIT",
-  "author": "kyo615",
+  "author": "Mortal520",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kyo615/dsh-provider-pro.git"
+    "url": "git+https://github.com/Mortal520/dsh-provider-pro.git"
   },
   "keywords": [
     "deepseek",
