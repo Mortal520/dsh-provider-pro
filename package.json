@@ -1,7 +1,7 @@
 {
   "name": "dsh-provider-pro",
   "description": "Custom User-Agent + official-channel-style reasoning-level switching for custom providers · 自定义供应方 User-Agent 与官方同款推理等级切换统一开关。",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

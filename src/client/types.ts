@@ -43,22 +43,13 @@ export interface PiAiSection {
 interface RpcResult<T> {
   ok: boolean
   value: T
-  error?: { message: string }
-}
-interface RpcEnvelope<T> {
-  result: RpcResult<T>
+  error?: { code?: string; message: string }
 }
 
 export interface SettingsPathOp {
   op: 'set' | 'unset'
   path: string[]
   value?: unknown
-}
-
-export interface SettingsMutationRequest {
-  ns: string
-  ops: SettingsPathOp[]
-  expectedRevision?: number
 }
 
 export interface SettingsNamespaceView {
@@ -72,33 +63,20 @@ export interface SettingsNamespaceView {
   revision: number
 }
 
-export interface DiscoveredModel {
-  id: string
-  name?: string
-  contextWindow?: number
-  maxTokens?: number
-  [key: string]: unknown
+export interface SettingsDescribeResult {
+  writable: boolean
+  hasDocument: boolean
+  namespaces: SettingsNamespaceView[]
 }
 
-/** The slice of IApiClient the card uses. */
-export interface ApiLike {
-  settings: {
-    describe(request: Record<string, never>): Promise<RpcEnvelope<{
-      writable: boolean
-      hasDocument: boolean
-      namespaces: SettingsNamespaceView[]
-    }>>
-    mutate(request: SettingsMutationRequest): Promise<RpcEnvelope<SettingsNamespaceView>>
-  }
-  llm: {
-    discoverModels(request: {
-      settingsNs: string
-      provider?: string
-      baseURL?: string
-      api?: string
-      apiKey?: string
-    }): Promise<RpcEnvelope<{ models: DiscoveredModel[] }>>
-  }
+/**
+ * The settings wire face of DSH 2.0.x (`ctx.remote.settings`): positional
+ * parameters and a flat `{ok, value, error}` result — the same face the
+ * official settings pages use.
+ */
+export interface SettingsWireFace {
+  describe(): Promise<RpcResult<SettingsDescribeResult>>
+  mutate(ns: string, ops: SettingsPathOp[], expectedRevision?: number): Promise<RpcResult<SettingsNamespaceView>>
 }
 
 /** A t() with a pluggable [untranslated] fallback for unknown keys. */

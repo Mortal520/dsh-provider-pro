@@ -170,6 +170,7 @@ const fillSection = {
         { id: 'needs-levels' }, // undefined reasoningEfforts -> filled
         { id: 'explicit-off', reasoningEfforts: false }, // explicit false -> untouched
         { id: 'has-dict', reasoningEfforts: { off: null, high: 'high' } }, // existing -> untouched
+        { id: 'legacy-fill', reasoningEfforts: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' } }, // 0.1.0–0.2.0 auto-fill -> migrated
       ],
     },
   },
@@ -185,10 +186,11 @@ const setModels = writes.flatMap((w) => w.ops).find((op) => op.path[0] === 'prov
 assert.ok(setModels, 'auto-fill emitted a set models op on startup')
 
 const filled = fillSection.providers.gw.models
-assert.strictEqual(filled.length, 3, 'kept all three models as declared')
-assert.deepStrictEqual(filled[0].reasoningEfforts, { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' }, 'undefined reasoningEfforts replaced with the full seven-level dictionary')
+assert.strictEqual(filled.length, 4, 'kept all four models as declared')
+assert.deepStrictEqual(filled[0].reasoningEfforts, { off: null, low: 'low', medium: 'medium', high: 'high', max: 'max' }, 'undefined reasoningEfforts replaced with the five-level dictionary')
 assert.strictEqual(filled[1].reasoningEfforts, false, 'explicit false left untouched')
 assert.deepStrictEqual(filled[2].reasoningEfforts, { off: null, high: 'high' }, 'existing dictionary left untouched')
+assert.deepStrictEqual(filled[3].reasoningEfforts, { off: null, low: 'low', medium: 'medium', high: 'high', max: 'max' }, 'legacy seven-level auto-fill migrated to the five-level set')
 
 // second scan (settings/updated for our ns) is a no-op — nothing missing anymore
 const before = writes.length
@@ -206,7 +208,7 @@ fillSection.providers.gw.models.push({ id: 'late-model' })
 fillCtx.__bump('llm-pi-ai')
 await new Promise((r) => setTimeout(r, 30))
 const late = fillSection.providers.gw.models.find((m) => m.id === 'late-model')
-assert.deepStrictEqual(late.reasoningEfforts, { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' }, 'late-added model filled on settings/updated')
+assert.deepStrictEqual(late.reasoningEfforts, { off: null, low: 'low', medium: 'medium', high: 'high', max: 'max' }, 'late-added model filled on settings/updated')
 
 fillCtx.__dispose()
 console.log('smoke-provider-pro: OK — reasoning-effort auto-fill fills missing, keeps explicit, stays stable')

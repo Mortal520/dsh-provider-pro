@@ -21,16 +21,17 @@
  * never reads, so it is a pure configuration storage the patch consumes.
  *
  * The same effect also runs an auto-fill pass ("补档器"): every hand-declared
- * model entry in the user layer that has no `reasoningEfforts` gets the full
- * seven-level dictionary written for it. pi-ai reports a model with that
- * dictionary as a reasoning model with the complete level set, and the
+ * model entry in the user layer that has no `reasoningEfforts` gets the
+ * five-level dictionary (off/low/medium/high/max) written for it. pi-ai
+ * reports a model with that dictionary as a reasoning model, and the
  * composer's model dropdown then offers the same effort switching the official
  * channels get — defaulting to the "Default" tier (no `defaultEffort` is set,
  * so the picker pre-selects its own Default option). Explicit `false` and
- * declared dictionaries are never overwritten.
+ * declared dictionaries are never overwritten; byte-exact dictionaries from
+ * the 0.1.0–0.2.0 seven-level fill migrate down to the current set.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { FULL_REASONING_EFFORTS } from './shared.ts'
+import { FILL_REASONING_EFFORTS, LEGACY_REASONING_EFFORTS, matchesEfforts } from './shared.ts'
 
 /** The pi-ai adapter's settings namespace, whose providers we extend. */
 const NS = 'llm-pi-ai'
@@ -152,11 +153,15 @@ const AUTO_REASONING_FLAG = 'dshProviderProAutoReasoning'
 
 /**
  * One auto-fill pass: give every hand-declared model without a
- * `reasoningEfforts` the full dictionary. Applies through `settings.mutate`
- * (path ops, no expected revision — background best-effort) and only writes
- * when something is actually missing, so the next `settings/updated` it
- * triggers is a no-op scan. The master switch (top-level
- * `dshProviderProAutoReasoning`, absent = on) disables the pass entirely.
+ * `reasoningEfforts` the five-level dictionary (off/low/medium/high/max),
+ * and migrate models still carrying the byte-exact seven-level dictionary
+ * auto-filled by 0.1.0–0.2.0 down to the current set. Explicit `false` and
+ * hand-customized dictionaries are never overwritten. Applies through
+ * `settings.mutate` (path ops, no expected revision — background best-effort)
+ * and only writes when something actually changes, so the next
+ * `settings/updated` it triggers is a no-op scan. The master switch
+ * (top-level `dshProviderProAutoReasoning`, absent = on) disables the pass
+ * entirely.
  */
 async function fillEfforts(ctx: Context): Promise<void> {
   const settings = settingsApi(ctx)
@@ -180,9 +185,15 @@ async function fillEfforts(ctx: Context): Promise<void> {
     const next = declared.map((raw) => {
       if (raw === null || typeof raw !== 'object') return raw
       const entry = raw as ModelEntry
-      if (entry.reasoningEfforts !== undefined) return raw
-      changed = true
-      return { ...entry, reasoningEfforts: { ...FULL_REASONING_EFFORTS } }
+      if (entry.reasoningEfforts === undefined) {
+        changed = true
+        return { ...entry, reasoningEfforts: { ...FILL_REASONING_EFFORTS } }
+      }
+      if (matchesEfforts(entry.reasoningEfforts, LEGACY_REASONING_EFFORTS)) {
+        changed = true
+        return { ...entry, reasoningEfforts: { ...FILL_REASONING_EFFORTS } }
+      }
+      return raw
     })
     if (!changed) continue
     ops.push({ op: 'set', path: ['providers', route, 'models'], value: next })

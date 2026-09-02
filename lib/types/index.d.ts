@@ -21,13 +21,14 @@
  * never reads, so it is a pure configuration storage the patch consumes.
  *
  * The same effect also runs an auto-fill pass ("补档器"): every hand-declared
- * model entry in the user layer that has no `reasoningEfforts` gets the full
- * seven-level dictionary written for it. pi-ai reports a model with that
- * dictionary as a reasoning model with the complete level set, and the
+ * model entry in the user layer that has no `reasoningEfforts` gets the
+ * five-level dictionary (off/low/medium/high/max) written for it. pi-ai
+ * reports a model with that dictionary as a reasoning model, and the
  * composer's model dropdown then offers the same effort switching the official
  * channels get — defaulting to the "Default" tier (no `defaultEffort` is set,
  * so the picker pre-selects its own Default option). Explicit `false` and
- * declared dictionaries are never overwritten.
+ * declared dictionaries are never overwritten; byte-exact dictionaries from
+ * the 0.1.0–0.2.0 seven-level fill migrate down to the current set.
  */
 import type { Context } from '@deepseek-ai/cordis';
 export declare const name = "dsh-provider-pro";

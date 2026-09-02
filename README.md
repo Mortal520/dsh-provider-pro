@@ -8,11 +8,13 @@ A DeepSeek Harness plugin that gives custom providers (hand-added via the
 `llm-pi-ai` provider) two capabilities that official channels already have —
 out of the box, with no per-model configuration.
 
-> **兼容性**：已对照 DSH Desktop 2.0.4（harness `0.1.2-alpha.1`、cordis `4.0.1`）
-> 逐面核验（settings 服务、RPC、`settings.section` 槽、ModuleLoader bundle 协议、
-> 设计令牌、pi-ai 推理词典语义），并兼容更早的 profile 包布局。
-> Verified surface-by-surface against DSH Desktop 2.0.4 (harness 0.1.2-alpha.1,
-> cordis 4.0.1); also compatible with the earlier profile-based package layout.
+> **兼容性**：需要 **DSH Desktop 2.0+**（客户端 RPC 走 `ctx.remote.settings`）。
+> 已对照 DSH Desktop 2.0.4（harness `0.1.2-alpha.1`、cordis `4.0.1`）逐面核验：
+> settings 服务与 RPC、`settings.section` 槽、ModuleLoader bundle 协议、设计令牌、
+> pi-ai 推理词典语义。
+> Requires **DSH Desktop 2.0+** (the client half talks to `ctx.remote.settings`);
+> verified surface-by-surface against DSH Desktop 2.0.4 (harness 0.1.2-alpha.1,
+> cordis 4.0.1).
 
 ---
 
@@ -22,11 +24,12 @@ out of the box, with no per-model configuration.
 
 1. **自定义 User-Agent** — 为每个自定义供应方设置请求 UA（覆盖内置 attribution 头），
    应对按 UA 限流、或禁止非官方终端应用访问的供应方。
-2. **推理等级切换** — 与官方渠道一模一样的思考等级下拉。数据层自动完成：
-   Host 半自动为每个缺少 `reasoningEfforts` 的自定义模型写入完整七档词典
-   （`off` → `null`，`minimal/low/medium/high/xhigh/max` → 同名值），
-   对话模型选择器随即出现完整推理等级行；`defaultEffort` 不写 → 初始档位为
-   **Default**（请求不带思考参数，由供应方自行决定）。切换发生在聊天里，无需设置。
+2. **推理等级切换** — 与官方渠道一样的思考等级下拉。数据层自动完成：
+   Host 半自动为每个缺少 `reasoningEfforts` 的自定义模型写入五档词典
+   （`off` → `null`，`low/medium/high/max` → 同名值；0.2.x 及更早自动补的
+   七档词典会被自动迁移为五档），对话模型选择器随即出现推理等级行；
+   `defaultEffort` 不写 → 初始档位为 **Default**（请求不带思考参数，由供应方
+   自行决定）。切换发生在聊天里，无需设置。
 
 ### 安装
 
@@ -36,7 +39,7 @@ dsh plugin --profile web add github:Mortal520/dsh-provider-pro
 
 # 方式二：本地仓库 / tarball（免构建许可）
 dsh plugin --profile web add ./dsh-provider-pro
-dsh plugin --profile web add ./dsh-provider-pro-0.1.0.tgz   # 先 pnpm pack
+dsh plugin --profile web add ./dsh-provider-pro-0.3.0.tgz   # 先 pnpm pack
 ```
 
 > git 安装注意：pnpm ≥10 默认拒绝运行 git 依赖的构建脚本。首次 `add` 报错时，
@@ -71,7 +74,7 @@ dsh plugin --profile web add ./dsh-provider-pro-0.1.0.tgz   # 先 pnpm pack
 ### 实现原理（给维护者）
 
 - **推理等级（数据层）**：完整 `reasoningEfforts` 词典 → pi-ai `resolveModelReasoning`
-  → 模型 `reasoning = { thinkingLevelMap 全 7 档 }` → ModelSelect 的 Effort 行天然出现；
+  → 模型 `reasoning = { thinkingLevelMap 全 5 档 }` → ModelSelect 的 Effort 行天然出现；
   `defaultEffort` 留空 → 选择器自动前置「Default」并默认选中。
 - **总开关**：`llm-pi-ai` 用户层顶层的 `dshProviderProAutoReasoning`（缺省 = 开），
   Host 补档器每次扫描前检查该标志；客户端点开关一次性写入
@@ -108,12 +111,13 @@ pnpm run smoke    # Host 行为冒烟（fetch 补丁 / 补档器 / 总开关）
 1. **Custom User-Agent** — set a request-level UA per custom provider
    (overrides DSH's built-in attribution header). Handles providers that
    rate-limit by UA or reject non-official terminal apps.
-2. **Reasoning-level switching** — the same seven-level reasoning picker as
-   the official channels. Fully data-driven, no per-model setup: the host
-   fills a complete `reasoningEfforts` dictionary for every hand-declared
-   custom model that lacks one, and keeps `defaultEffort` unset, so the picker
-   preselects **Default** (no thinking parameter is sent; the provider decides).
-   Switch levels any time in chat.
+2. **Reasoning-level switching** — the same reasoning picker as the official
+   channels (off / low / medium / high / max). Fully data-driven, no per-model
+   setup: the host fills a five-level `reasoningEfforts` dictionary for every
+   hand-declared custom model that lacks one (byte-exact seven-level
+   dictionaries from 0.2.x and earlier migrate down automatically) and keeps
+   `defaultEffort` unset, so the picker preselects **Default** (no thinking
+   parameter is sent; the provider decides). Switch levels any time in chat.
 
 ### Install
 
@@ -123,13 +127,13 @@ dsh plugin --profile web add github:Mortal520/dsh-provider-pro
 
 # or a local checkout / tarball (no build permission needed)
 dsh plugin --profile web add ./dsh-provider-pro
-dsh plugin --profile web add ./dsh-provider-pro-0.1.0.tgz   # after pnpm pack
+dsh plugin --profile web add ./dsh-provider-pro-0.3.0.tgz   # after pnpm pack
 ```
 
 > git installs run the package's `prepare` script. pnpm ≥10 blocks that until
 > you allow it: copy the package key pnpm prints into the profile's
 > `pnpm-workspace.yaml` (`allowBuilds: dsh-provider-pro: true`) and re-run
-> `add`. Only allow packages you trust — and preferable pin a commit
+> `add`. Only allow packages you trust — and preferably pin a commit
 > (`github:Mortal520/dsh-provider-pro#<sha>`).
 >
 > To avoid that step entirely, this repo commits its built `lib/`, and

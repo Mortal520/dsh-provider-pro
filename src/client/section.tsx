@@ -5,24 +5,24 @@
  * Minimal by design: the two capabilities this plugin adds to custom providers
  * are (1) a request-level User-Agent override and (2) official-channel-style
  * reasoning-level switching, which is purely data-driven — the host half
- * auto-fills a full `reasoningEfforts` set for every hand-declared custom
- * model, and the composer's effort dropdown appears exactly like the official
- * channels'. So this screen only needs a global master switch for that auto
- * behavior plus one User-Agent input per provider; level switching itself
- * happens in the chat model picker, not here.
+ * auto-fills a five-level `reasoningEfforts` set (off/low/medium/high/max)
+ * for every hand-declared custom model, and the composer's effort dropdown
+ * appears exactly like the official channels'. So this screen only needs a
+ * global master switch for that auto behavior plus one User-Agent input per
+ * provider; level switching itself happens in the chat model picker, not here.
  */
 import { useEffect, useState } from 'react'
 import type { T } from './types'
 import type {
-  ApiLike,
   PiAiSection,
   ProviderModel,
   ProviderProfile,
   SettingsNamespaceView,
   SettingsPathOp,
+  SettingsWireFace,
 } from './types'
 import { NS } from './types'
-import { THINKING_LEVELS, FULL_REASONING_EFFORTS, type ThinkingLevel } from '../shared.ts'
+import { FILL_REASONING_EFFORTS, LEGACY_REASONING_EFFORTS, matchesEfforts } from '../shared.ts'
 
 /** Cross-render event hook the section subscribes to (wired in client/index.ts). */
 export interface SectionEvents {
@@ -30,7 +30,8 @@ export interface SectionEvents {
 }
 
 export interface SectionProps {
-  api: ApiLike
+  /** The `ctx.remote.settings` wire face (DSH 2.0.x); undefined when absent. */
+  api: SettingsWireFace | undefined
   t: T
   events: SectionEvents
 }
@@ -110,15 +111,13 @@ function userSectionOf(view: SettingsNamespaceView): PiAiSection | undefined {
   return undefined
 }
 
-/** True when `reasoningEfforts` is byte-for-byte the auto-fill dictionary. */
+/**
+ * True when `reasoningEfforts` is byte-for-byte one of our auto-fill shapes:
+ * the current five-level dictionary, or the seven-level dictionary written by
+ * 0.1.0–0.2.0 (legacy). A hand-customized dictionary never matches.
+ */
 function isAutoFilled(value: unknown): boolean {
-  if (value === null || typeof value !== 'object') return false
-  const dict = value as Record<string, unknown>
-  for (const level of THINKING_LEVELS) {
-    const expected = FULL_REASONING_EFFORTS[level]
-    if (expected === null ? dict[level] !== null : dict[level] !== expected) return false
-  }
-  return Object.keys(dict).length === THINKING_LEVELS.length
+  return matchesEfforts(value, FILL_REASONING_EFFORTS) || matchesEfforts(value, LEGACY_REASONING_EFFORTS)
 }
 
 /** Next models array with the auto-filled dictionary removed, or undefined. */
@@ -140,7 +139,7 @@ function ProviderCard(props: {
   route: string
   profile: ProviderProfile
   revision: number
-  api: ApiLike
+  api: SettingsWireFace
   t: T
   onSaved: () => void
 }) {
@@ -160,13 +159,9 @@ function ProviderCard(props: {
           ? { op: 'unset', path: ['providers', route, 'userAgent'] }
           : { op: 'set', path: ['providers', route, 'userAgent'], value: ua.trim() },
       ]
-      const response = await api.settings.mutate({
-        ns: NS,
-        ops,
-        expectedRevision: revision,
-      })
-      if (!response.result.ok) {
-        setFailure(t('saveFailed') + (response.result.error?.message ?? ''))
+      const response = await api.mutate(NS, ops, revision)
+      if (!response.ok) {
+        setFailure(t('saveFailed') + (response.error?.message ?? ''))
         return
       }
       setDirty(false)
@@ -261,14 +256,15 @@ export function ProviderProSection(props: SectionProps) {
   useEffect(() => {
     let cancelled = false
     setLoadError(undefined)
+    if (api === undefined) return
     void (async () => {
       try {
-        const response = await api.settings.describe({})
-        if (!response.result.ok) {
-          if (!cancelled) setLoadError(response.result.error?.message ?? t('loadFailed'))
+        const response = await api.describe()
+        if (!response.ok) {
+          if (!cancelled) setLoadError(response.error?.message ?? t('loadFailed'))
           return
         }
-        const found = response.result.value.namespaces.find((entry) => entry.ns === NS)
+        const found = response.value.namespaces.find((entry) => entry.ns === NS)
         if (!cancelled && found !== undefined) {
           setView(found)
           const section = userSectionOf(found)
@@ -292,9 +288,9 @@ export function ProviderProSection(props: SectionProps) {
   const routes = Object.keys(providers)
 
   /** Flip the master switch: on is one flag write; off also reverts models
-   * whose dictionary is byte-for-byte the auto-filled one. */
+   * whose dictionary is byte-for-byte one of our auto-filled shapes. */
   const flipAuto = async (next: boolean) => {
-    if (view === undefined || flipBusy) return
+    if (api === undefined || view === undefined || flipBusy) return
     setFlipBusy(true)
     setFlipFailure(undefined)
     try {
@@ -307,13 +303,9 @@ export function ProviderProSection(props: SectionProps) {
           }
         }
       }
-      const response = await api.settings.mutate({
-        ns: NS,
-        ops,
-        expectedRevision: view.revision,
-      })
-      if (!response.result.ok) {
-        setFlipFailure(t('saveFailed') + (response.result.error?.message ?? ''))
+      const response = await api.mutate(NS, ops, view.revision)
+      if (!response.ok) {
+        setFlipFailure(t('saveFailed') + (response.error?.message ?? ''))
         return
       }
       setAutoOn(next)
@@ -343,7 +335,9 @@ export function ProviderProSection(props: SectionProps) {
           {loadError}
         </span>
       ) : null}
-      {view === undefined ? (
+      {api === undefined ? (
+        <span className="dpp-muted">{t('rpcUnavailable')}</span>
+      ) : view === undefined ? (
         <span className="dpp-muted">{t('loadFailed')}</span>
       ) : section === undefined ? (
         <span className="dpp-muted">{t('nsUnavailable')}</span>

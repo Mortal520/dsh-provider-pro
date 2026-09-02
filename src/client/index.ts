@@ -12,13 +12,18 @@ import type { SectionEvents, SectionProps } from './section'
 import { ProviderProSection } from './section'
 import { en, zh } from './locales'
 import { NS } from './types'
-import type { ApiLike, T } from './types'
+import type { SettingsWireFace, T } from './types'
 
 const NS_LOCALE = 'dsh-provider-pro'
 
-/** Required services (cordis fiber inject). The slot registration defers on
- * `slots.inject()`, so activation order against ui-settings is not a concern. */
-export const inject = ['slots', 'locale', 'connection', 'remote']
+/**
+ * Required services (cordis fiber inject). The slot registration defers on
+ * `slots.inject()`, so activation order against ui-settings is not a concern.
+ * The settings wire face is read lazily off the remote service (DSH 2.0.x
+ * shape) rather than injected: an absent face degrades to a clear message in
+ * the section instead of blocking plugin activation.
+ */
+export const inject = ['slots', 'locale', 'remote']
 
 /**
  * Cordis service surfaces this bundle consumes. Local structural types keep
@@ -37,8 +42,8 @@ interface ClientServices {
   }
   remote: {
     $on(event: string, handler: (ns?: unknown) => void): () => void
+    settings?: SettingsWireFace
   }
-  get<T>(key: string): T
 }
 
 export const name = 'dsh-provider-pro'
@@ -80,7 +85,7 @@ export function apply(ctx: Context) {
   })
 
   const injected = (): SectionProps => ({
-    api: c.get<{ api: ApiLike }>('connection').api,
+    api: c.remote.settings,
     t,
     events,
   })

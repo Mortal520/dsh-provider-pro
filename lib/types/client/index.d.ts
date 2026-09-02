@@ -8,8 +8,13 @@
  * provider — using the exact RPC shapes the official Models page uses.
  */
 import type { Context } from '@deepseek-ai/cordis';
-/** Required services (cordis fiber inject). The slot registration defers on
- * `slots.inject()`, so activation order against ui-settings is not a concern. */
+/**
+ * Required services (cordis fiber inject). The slot registration defers on
+ * `slots.inject()`, so activation order against ui-settings is not a concern.
+ * The settings wire face is read lazily off the remote service (DSH 2.0.x
+ * shape) rather than injected: an absent face degrades to a clear message in
+ * the section instead of blocking plugin activation.
+ */
 export declare const inject: string[];
 export declare const name = "dsh-provider-pro";
 export declare function apply(ctx: Context): void;

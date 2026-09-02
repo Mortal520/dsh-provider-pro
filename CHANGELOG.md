@@ -2,6 +2,27 @@
 
 All notable changes to dsh-provider-pro.
 
+## [0.3.0] - 2026-09-02
+
+### Fixed
+- **Settings section failed on DSH 2.0.x** with
+  `TypeError: Cannot read properties of undefined (reading 'settings')`:
+  the client RPC surface moved. The section now talks to
+  `ctx.remote.settings` (the same face the official settings pages use) —
+  positional `mutate(ns, ops, expectedRevision)` parameters, zero-argument
+  `describe()`, and the flat `{ok, value, error}` envelope. `connection` is
+  no longer injected, and a missing face degrades to a clear in-section
+  message instead of a TypeError.
+
+### Changed
+- **Reasoning-level auto-fill now offers five levels** (off / low / medium /
+  high / max); `minimal` and `xhigh` are removed by request. Models still
+  carrying a byte-exact seven-level dictionary auto-filled by 0.1.0–0.2.0
+  migrate down automatically on the next fill pass, and the master switch's
+  cleanup recognizes both shapes. Hand-customized dictionaries and explicit
+  `false` are never touched.
+- The plugin now **requires DSH Desktop 2.0+** (the `remote.settings` face).
+
 ## [0.2.0] - 2026-09-02
 
 ### Compatibility
