@@ -86,19 +86,33 @@ export function apply(ctx: Context) {
   })
 
   /**
-   * Probe detection: try to access dsh-provider-probe's typert remote
-   * (`providerProbe`) lazily. If available, the section will show probe
-   * buttons; if not, probe features are hidden (soft dependency).
+   * Probe detection: resolve dsh-provider-probe's typert remote namespace
+   * (`providerProbe`) through the cordis service container. The gateway
+   * registers typert remote services under the key `remote:<namespace>`,
+   * so we try `ctx.get('remote:providerProbe')`. If unavailable (probe
+   * not installed), probe features are hidden (soft dependency).
    */
   let probeApi: ProviderProbeRemote | undefined
   try {
-    const remote = c.remote as unknown as Record<string, unknown>
-    const probeNs = remote?.providerProbe as Record<string, unknown> | undefined
-    if (typeof probeNs?.catalog === 'function' && typeof probeNs?.probe === 'function') {
-      probeApi = probeNs as unknown as ProviderProbeRemote
+    // Method 1: cordis service resolution (most reliable)
+    const svc = (ctx as unknown as { get(key: string): unknown }).get('remote:providerProbe')
+    if (svc !== undefined && svc !== null) {
+      const ns = svc as Record<string, unknown>
+      if (typeof ns.catalog === 'function' && typeof ns.probe === 'function') {
+        probeApi = ns as unknown as ProviderProbeRemote
+      }
     }
   } catch {
-    // probe not available — silently degrade
+    // Method 2: try the remote proxy directly (fallback)
+    try {
+      const remote = c.remote as unknown as Record<string, unknown>
+      const probeNs = remote?.providerProbe as Record<string, unknown> | undefined
+      if (typeof probeNs?.catalog === 'function' && typeof probeNs?.probe === 'function') {
+        probeApi = probeNs as unknown as ProviderProbeRemote
+      }
+    } catch {
+      // probe not available — silently degrade
+    }
   }
 
   const injected = (): SectionProps => ({
