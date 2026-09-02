@@ -27,3 +27,5 @@ export declare const LEGACY_REASONING_EFFORTS: Record<ThinkingLevel, string | nu
  * never treated as ours.
  */
 export declare function matchesEfforts(value: unknown, dict: Record<string, string | null>): boolean;
+/** The value written to a model's `input` field when the user enables image support. */
+export declare const INPUT_WITH_IMAGE: readonly ['text', 'image'];

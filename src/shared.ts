@@ -63,3 +63,8 @@ export function matchesEfforts(value: unknown, dict: Record<string, string | nul
   }
   return Object.keys(entries).length === Object.keys(dict).length
 }
+
+/* ------------------------------------------------------------------ input */
+
+/** The value written to a model's `input` field when the user enables image support. */
+export const INPUT_WITH_IMAGE = ['text', 'image'] as const

@@ -3,9 +3,10 @@
  *
  * Registers a Settings → 模型增强 section (`settings.section`, id
  * `provider-pro`, order 15 — right under the official 模型 page, which is 10).
- * The section edits the `llm-pi-ai` user layer directly and holds exactly two
- * controls: the reasoning-level master switch and one User-Agent card per
- * provider — using the exact RPC shapes the official Models page uses.
+ * The section edits the `llm-pi-ai` user layer directly and holds three
+ * capabilities: the reasoning-level master switch, per-provider User-Agent
+ * override, and per-model image-input declaration — plus optional probe
+ * buttons when dsh-provider-probe is installed.
  */
 import type { Context } from '@deepseek-ai/cordis';
 /**

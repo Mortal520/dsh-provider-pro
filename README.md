@@ -30,6 +30,10 @@ out of the box, with no per-model configuration.
    对话模型选择器随即出现推理等级行；
    `defaultEffort` 不写 → 初始档位为 **Default**（请求不带思考参数，由供应方
    自行决定）。切换发生在聊天里，无需设置。
+3. **图片输入声明** — 每个模型卡片内提供「支持图片输入」复选框，
+   勾选即写入 `input: [text, image]`，DSH 随即允许向该模型附加图片。
+4. **供应商探测**（软依赖 `dsh-provider-probe`）— 安装 dsh-provider-probe 后，
+   每个模型旁出现「探测」按钮，一键发送极小请求检测端点可达性、延迟和错误分类。
 
 ### 安装
 
@@ -117,6 +121,12 @@ pnpm run smoke    # Host 行为冒烟（fetch 补丁 / 补档器 / 总开关）
    hand-declared custom model that lacks one and keeps `defaultEffort` unset,
    so the picker preselects **Default** (no thinking parameter is sent; the
    provider decides). Switch levels any time in chat.
+3. **Image-input declaration** — each model card shows a "Support image input"
+   checkbox; checking it writes `input: [text, image]` so DSH allows image
+   attachments for that model.
+4. **Provider probe** (soft dependency on `dsh-provider-probe`) — when installed,
+   a "Probe" button appears per model, sending a minimal request to measure
+   first-token latency, total time, and finish reason.
 
 ### Install
 

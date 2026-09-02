@@ -3,16 +3,17 @@
  *
  * Registers a Settings → 模型增强 section (`settings.section`, id
  * `provider-pro`, order 15 — right under the official 模型 page, which is 10).
- * The section edits the `llm-pi-ai` user layer directly and holds exactly two
- * controls: the reasoning-level master switch and one User-Agent card per
- * provider — using the exact RPC shapes the official Models page uses.
+ * The section edits the `llm-pi-ai` user layer directly and holds three
+ * capabilities: the reasoning-level master switch, per-provider User-Agent
+ * override, and per-model image-input declaration — plus optional probe
+ * buttons when dsh-provider-probe is installed.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { SectionEvents, SectionProps } from './section'
 import { ProviderProSection } from './section'
 import { en, zh } from './locales'
 import { NS } from './types'
-import type { SettingsWireFace, T } from './types'
+import type { SettingsWireFace, ProviderProbeRemote, T } from './types'
 
 const NS_LOCALE = 'dsh-provider-pro'
 
@@ -84,10 +85,27 @@ export function apply(ctx: Context) {
     }
   })
 
+  /**
+   * Probe detection: try to access dsh-provider-probe's typert remote
+   * (`providerProbe`) lazily. If available, the section will show probe
+   * buttons; if not, probe features are hidden (soft dependency).
+   */
+  let probeApi: ProviderProbeRemote | undefined
+  try {
+    const remote = c.remote as unknown as Record<string, unknown>
+    const probeNs = remote?.providerProbe as Record<string, unknown> | undefined
+    if (typeof probeNs?.catalog === 'function' && typeof probeNs?.probe === 'function') {
+      probeApi = probeNs as unknown as ProviderProbeRemote
+    }
+  } catch {
+    // probe not available — silently degrade
+  }
+
   const injected = (): SectionProps => ({
     api: c.remote.settings,
     t,
     events,
+    probeApi,
   })
 
   c.slots.inject('settings.section', () =>

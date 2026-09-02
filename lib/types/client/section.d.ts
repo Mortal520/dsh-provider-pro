@@ -1,5 +1,5 @@
 import type { T } from './types';
-import type { SettingsWireFace } from './types';
+import type { ProviderProbeRemote, SettingsWireFace } from './types';
 /** Cross-render event hook the section subscribes to (wired in client/index.ts). */
 export interface SectionEvents {
     on(fn: () => void): () => void;
@@ -9,5 +9,7 @@ export interface SectionProps {
     api: SettingsWireFace | undefined;
     t: T;
     events: SectionEvents;
+    /** Probe remote from dsh-provider-probe; undefined when not installed. */
+    probeApi?: ProviderProbeRemote;
 }
 export declare function ProviderProSection(props: SectionProps): import("react").JSX.Element;

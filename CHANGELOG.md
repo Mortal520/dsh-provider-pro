@@ -2,6 +2,23 @@
 
 All notable changes to dsh-provider-pro.
 
+## [0.4.0] - 2026-09-02
+
+### Added
+- **Image-input declaration**: each model card now shows a
+  "Support image input" checkbox; checking it writes
+  `input: [text, image]` to the model entry in `settings.yaml`
+  so DSH allows image attachments for that model.
+- **Provider probe integration** (soft dependency): when
+  `dsh-provider-probe` is installed, each model row gains a
+  "Probe" button that calls `providerProbe/probe` via typert
+  remote and displays first-token latency, total time, and
+  finish reason.
+
+### Changed
+- Provider cards now render the full model list below the
+  User-Agent field.
+
 ## [0.3.0] - 2026-09-02
 
 ### Fixed

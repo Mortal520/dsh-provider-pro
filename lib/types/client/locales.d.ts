@@ -20,6 +20,17 @@ export declare const zh: {
     readonly saving: '保存中…';
     readonly saved: '已保存';
     readonly saveFailed: '保存失败：';
+    readonly models: '模型';
+    readonly imageInput: '支持图片输入';
+    readonly imageInputHint: '勾选后该模型声明接受图片输入（input: text + image），DSH 将允许附件上传。';
+    readonly probing: '探测中…';
+    readonly probeResult: '探测结果';
+    readonly probeFirstToken: '首 token';
+    readonly probeTotal: '总耗时';
+    readonly probeFinish: '结束原因';
+    readonly probeError: '错误';
+    readonly probeNotInstalled: '未安装 dsh-provider-probe，探测功能不可用。';
+    readonly probe: '探测';
 };
 export declare const en: {
     readonly nav: 'Model Enhance';
@@ -42,5 +53,16 @@ export declare const en: {
     readonly saving: 'Saving…';
     readonly saved: 'Saved';
     readonly saveFailed: 'Save failed: ';
+    readonly models: 'Models';
+    readonly imageInput: 'Support image input';
+    readonly imageInputHint: 'When checked, this model declares it accepts image input (input: text + image), allowing DSH to attach images.';
+    readonly probing: 'Probing…';
+    readonly probeResult: 'Probe result';
+    readonly probeFirstToken: 'First token';
+    readonly probeTotal: 'Total time';
+    readonly probeFinish: 'Finish reason';
+    readonly probeError: 'Error';
+    readonly probeNotInstalled: 'dsh-provider-probe not installed — probe features unavailable.';
+    readonly probe: 'Probe';
 };
 export type LocaleKey = keyof typeof zh | keyof typeof en;

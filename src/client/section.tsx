@@ -17,12 +17,14 @@ import type {
   PiAiSection,
   ProviderModel,
   ProviderProfile,
+  ProbeResult,
+  ProviderProbeRemote,
   SettingsNamespaceView,
   SettingsPathOp,
   SettingsWireFace,
 } from './types'
 import { NS } from './types'
-import { FILL_REASONING_EFFORTS, LEGACY_REASONING_EFFORTS, matchesEfforts } from '../shared.ts'
+import { FILL_REASONING_EFFORTS, LEGACY_REASONING_EFFORTS, INPUT_WITH_IMAGE, matchesEfforts } from '../shared.ts'
 
 /** Cross-render event hook the section subscribes to (wired in client/index.ts). */
 export interface SectionEvents {
@@ -34,6 +36,8 @@ export interface SectionProps {
   api: SettingsWireFace | undefined
   t: T
   events: SectionEvents
+  /** Probe remote from dsh-provider-probe; undefined when not installed. */
+  probeApi?: ProviderProbeRemote
 }
 
 /** Top-level flag in the `llm-pi-ai` user layer controlling the auto-fill. */
@@ -90,6 +94,26 @@ const css = `
 }
 .dpp-primary:disabled { opacity: 0.55; cursor: not-allowed; }
 .dpp-foot { display: flex; align-items: center; gap: 12px; }
+.dpp-models { display: flex; flex-direction: column; gap: 0; border-top: 1px solid var(--dsw-alias-border-l2); padding-top: 10px; }
+.dpp-models-title { font-size: 13px; font-weight: 500; color: var(--dsw-alias-label-secondary); margin-bottom: 4px; }
+.dpp-model-row {
+  display: flex; align-items: center; gap: 10px; padding: 6px 0;
+  border-bottom: 1px solid var(--dsw-alias-border-l2); font-size: 13px;
+}
+.dpp-model-row:last-child { border-bottom: none; }
+.dpp-model-id { font-family: var(--ds-font-family-code); color: var(--dsw-alias-label-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.dpp-model-cb { display: flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
+.dpp-model-cb input { width: 14px; height: 14px; accent-color: var(--dsw-alias-button-primary-fill); margin: 0; }
+.dpp-model-cb-label { color: var(--dsw-alias-label-secondary); }
+.dpp-probe-btn {
+  background: var(--dsw-alias-button-elevated-fill); color: var(--dsw-alias-label-secondary);
+  border: 1px solid var(--dsw-alias-border-l2); border-radius: 6px;
+  padding: 2px 8px; font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.dpp-probe-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.dpp-probe-result { font-size: 12px; color: var(--dsw-alias-label-secondary); padding: 4px 0 2px; line-height: 18px; }
+.dpp-probe-ok { color: var(--dsw-alias-state-success-primary); }
+.dpp-probe-fail { color: var(--dsw-alias-state-error-primary); }
 `
 
 let styleInjected = false
@@ -134,6 +158,73 @@ function withoutAutoFilled(models: ProviderModel[] | undefined): ProviderModel[]
   return changed ? next : undefined
 }
 
+/* -------------------------------------------------------- model row (image input + probe) */
+
+function ModelRow(props: {
+  route: string
+  model: ProviderModel
+  modelIndex: number
+  revision: number
+  api: SettingsWireFace
+  t: T
+  probeApi?: ProviderProbeRemote
+  onMutated: () => void
+}) {
+  const { route, model, modelIndex, revision, api, t, probeApi, onMutated } = props
+  const hasImage = Array.isArray(model.input) && model.input.includes('image')
+  const [probeResult, setProbeResult] = useState<ProbeResult>()
+  const [probeBusy, setProbeBusy] = useState(false)
+
+  const toggleImage = async (next: boolean) => {
+    const op: SettingsPathOp = next
+      ? { op: 'set', path: ['providers', route, 'models', String(modelIndex), 'input'], value: [...INPUT_WITH_IMAGE] }
+      : { op: 'unset', path: ['providers', route, 'models', String(modelIndex), 'input'] }
+    const response = await api.mutate(NS, [op], revision)
+    if (response.ok) onMutated()
+  }
+
+  const runProbe = async () => {
+    if (!probeApi) return
+    setProbeBusy(true)
+    setProbeResult(undefined)
+    try {
+      const response = await probeApi.probe({ provider: route, model: model.id })
+      if (response.ok) setProbeResult(response.value)
+      else setProbeResult({ status: 'failure', provider: route, model: model.id, failure: { code: 'RPC', message: response.error?.message ?? 'Unknown error' } })
+    } catch (error) {
+      setProbeResult({ status: 'failure', provider: route, model: model.id, failure: { code: 'EXCEPTION', message: String(error) } })
+    } finally {
+      setProbeBusy(false)
+    }
+  }
+
+  return (
+    <div className="dpp-model-row">
+      <span className="dpp-model-id" title={model.id}>{model.id}</span>
+      <label className="dpp-model-cb">
+        <input
+          type="checkbox"
+          checked={hasImage}
+          onChange={(e) => void toggleImage(e.target.checked)}
+        />
+        <span className="dpp-model-cb-label">{t('imageInput')}</span>
+      </label>
+      {probeApi ? (
+        <button type="button" className="dpp-probe-btn" disabled={probeBusy} onClick={() => void runProbe()}>
+          {probeBusy ? t('probing') : t('probe')}
+        </button>
+      ) : null}
+      {probeResult ? (
+        <span className={'dpp-probe-result ' + (probeResult.status === 'success' ? 'dpp-probe-ok' : 'dpp-probe-fail')}>
+          {probeResult.status === 'success'
+            ? `${probeResult.firstTokenMs ?? '—'}ms / ${probeResult.totalMs ?? '—'}ms / ${probeResult.finishReason ?? '—'}`
+            : `${probeResult.failure?.code ?? 'ERR'}: ${probeResult.failure?.message ?? ''}`}
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
 /* --------------------------------------------------------- provider (UA) card */
 
 function ProviderCard(props: {
@@ -142,9 +233,10 @@ function ProviderCard(props: {
   revision: number
   api: SettingsWireFace
   t: T
+  probeApi?: ProviderProbeRemote
   onSaved: () => void
 }) {
-  const { route, profile, revision, api, t, onSaved } = props
+  const { route, profile, revision, api, t, probeApi, onSaved } = props
   const [ua, setUa] = useState(profile.userAgent ?? '')
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -233,6 +325,24 @@ function ProviderCard(props: {
           ) : null}
         </div>
       </div>
+      {Array.isArray(profile.models) && profile.models.length > 0 ? (
+        <div className="dpp-models">
+          <span className="dpp-models-title">{t('models')}</span>
+          {profile.models.map((model, idx) => (
+            <ModelRow
+              key={model.id}
+              route={route}
+              model={model}
+              modelIndex={idx}
+              revision={revision}
+              api={api}
+              t={t}
+              probeApi={probeApi}
+              onMutated={onSaved}
+            />
+          ))}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -240,7 +350,7 @@ function ProviderCard(props: {
 /* ---------------------------------------------------------------- root UI */
 
 export function ProviderProSection(props: SectionProps) {
-  const { api, t, events } = props
+  const { api, t, events, probeApi } = props
   ensureStyle()
 
   const [view, setView] = useState<SettingsNamespaceView>()
@@ -379,6 +489,7 @@ export function ProviderProSection(props: SectionProps) {
                 revision={view.revision}
                 api={api}
                 t={t}
+                probeApi={probeApi}
                 onSaved={reload}
               />
             ))

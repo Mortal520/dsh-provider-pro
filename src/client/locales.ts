@@ -20,6 +20,17 @@ export const zh = {
   saving: '保存中…',
   saved: '已保存',
   saveFailed: '保存失败：',
+  models: '模型',
+  imageInput: '支持图片输入',
+  imageInputHint: '勾选后该模型声明接受图片输入（input: text + image），DSH 将允许附件上传。',
+  probing: '探测中…',
+  probeResult: '探测结果',
+  probeFirstToken: '首 token',
+  probeTotal: '总耗时',
+  probeFinish: '结束原因',
+  probeError: '错误',
+  probeNotInstalled: '未安装 dsh-provider-probe，探测功能不可用。',
+  probe: '探测',
 } as const
 
 export const en = {
@@ -43,6 +54,17 @@ export const en = {
   saving: 'Saving…',
   saved: 'Saved',
   saveFailed: 'Save failed: ',
+  models: 'Models',
+  imageInput: 'Support image input',
+  imageInputHint: 'When checked, this model declares it accepts image input (input: text + image), allowing DSH to attach images.',
+  probing: 'Probing…',
+  probeResult: 'Probe result',
+  probeFirstToken: 'First token',
+  probeTotal: 'Total time',
+  probeFinish: 'Finish reason',
+  probeError: 'Error',
+  probeNotInstalled: 'dsh-provider-probe not installed — probe features unavailable.',
+  probe: 'Probe',
 } as const
 
 export type LocaleKey = keyof typeof zh | keyof typeof en

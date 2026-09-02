@@ -13,6 +13,7 @@ export declare const NS = "llm-pi-ai";
 /** One declared model entry inside a pi-ai provider profile. */
 export interface ProviderModel {
     id: string;
+    input?: string[];
     [key: string]: unknown;
 }
 /** A hand-declared provider profile as stored in the user layer. */
@@ -76,4 +77,49 @@ export interface SettingsWireFace {
 }
 /** A t() with a pluggable [untranslated] fallback for unknown keys. */
 export type TFallback = (key: LocaleKey) => string;
+/** Result of a single model probe (mirrors dsh-provider-probe's ProbeResult). */
+export interface ProbeResult {
+    status: 'success' | 'failure';
+    provider: string;
+    model: string;
+    firstTokenMs?: number | null;
+    totalMs?: number;
+    finishReason?: string;
+    usage?: {
+        promptTokens?: number;
+        completionTokens?: number;
+        totalTokens?: number;
+    };
+    failure?: {
+        code: string;
+        message: string;
+        category?: string;
+        status?: number;
+    };
+}
+/** Minimal shape of the providerProbe remote namespace exposed by dsh-provider-probe. */
+export interface ProviderProbeRemote {
+    catalog(): Promise<{
+        ok: boolean;
+        value: {
+            providers: Array<{
+                id: string;
+                models: Array<{
+                    id: string;
+                    inputModalities?: string[];
+                }>;
+            }>;
+        };
+    }>;
+    probe(request: {
+        provider: string;
+        model: string;
+    }, signal?: AbortSignal): Promise<{
+        ok: boolean;
+        value: ProbeResult;
+        error?: {
+            message: string;
+        };
+    }>;
+}
 export {};
