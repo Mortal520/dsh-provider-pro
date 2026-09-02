@@ -1,5 +1,5 @@
 import type { T } from './types';
-import type { ProviderProbeRemote, SettingsWireFace } from './types';
+import type { SettingsWireFace } from './types';
 /** Cross-render event hook the section subscribes to (wired in client/index.ts). */
 export interface SectionEvents {
     on(fn: () => void): () => void;
@@ -7,9 +7,27 @@ export interface SectionEvents {
 export interface SectionProps {
     /** The `ctx.remote.settings` wire face (DSH 2.0.x); undefined when absent. */
     api: SettingsWireFace | undefined;
+    /** The `ctx.remote.llm` face for streaming probe requests through DSH's LLM runtime. */
+    llm?: {
+        stream(params: {
+            provider: string;
+            model: string;
+            messages: Array<{
+                role: string;
+                content: string;
+            }>;
+            system?: string;
+            maxTokens?: number;
+            signal?: AbortSignal;
+        }): AsyncIterable<{
+            type: string;
+            text?: string;
+            usage?: {
+                completionTokens?: number;
+            };
+        }>;
+    };
     t: T;
     events: SectionEvents;
-    /** Lazy probe resolver — call on-demand to resolve dsh-provider-probe's remote. */
-    resolveProbe?: () => ProviderProbeRemote | undefined;
 }
 export declare function ProviderProSection(props: SectionProps): import("react").JSX.Element;

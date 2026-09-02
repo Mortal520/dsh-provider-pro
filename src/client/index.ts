@@ -5,26 +5,25 @@
  * `provider-pro`, order 15 — right under the official 模型 page, which is 10).
  * The section edits the `llm-pi-ai` user layer directly and holds three
  * capabilities: the reasoning-level master switch, per-provider User-Agent
- * override, and per-model image-input declaration — plus optional probe
- * buttons when dsh-provider-probe is installed.
+ * override, per-model image-input declaration, and built-in probe via
+ * the DSH LLM runtime (`remote.llm.stream()`).
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { SectionEvents, SectionProps } from './section'
 import { ProviderProSection } from './section'
 import { en, zh } from './locales'
 import { NS } from './types'
-import type { SettingsWireFace, ProviderProbeRemote, T } from './types'
+import type { SettingsWireFace, T } from './types'
 
 const NS_LOCALE = 'dsh-provider-pro'
 
 /**
- * Required services (cordis fiber inject). The slot registration defers on
- * `slots.inject()`, so activation order against ui-settings is not a concern.
- * The settings wire face must be declared as a dependency (`remote.settings`),
- * exactly as the official Models page does — cordis materializes `ctx.remote.settings`
- * only when the fiber injects it; reading it undeclared yields undefined.
+ * Required services (cordis fiber inject). `remote.settings` for reading
+ * and writing llm-pi-ai settings; `remote.llm` for built-in probe
+ * (streaming a minimal request through DSH's LLM runtime, which handles
+ * auth, routing, and attribution).
  */
-export const inject = ['slots', 'locale', 'remote', 'remote.settings']
+export const inject = ['slots', 'locale', 'remote', 'remote.settings', 'remote.llm']
 
 /**
  * Cordis service surfaces this bundle consumes. Local structural types keep
@@ -44,6 +43,16 @@ interface ClientServices {
   remote: {
     $on(event: string, handler: (ns?: unknown) => void): () => void
     settings?: SettingsWireFace
+    llm?: {
+      stream(params: {
+        provider: string
+        model: string
+        messages: Array<{ role: string; content: string }>
+        system?: string
+        maxTokens?: number
+        signal?: AbortSignal
+      }): AsyncIterable<{ type: string; text?: string; usage?: { completionTokens?: number } }>
+    }
   }
 }
 
@@ -85,39 +94,11 @@ export function apply(ctx: Context) {
     }
   })
 
-  /**
-   * Probe resolution: instead of detecting the probe remote at activation
-   * time (which may be too early for the gateway to have registered the
-   * typert remote descriptors), we pass a lazy resolver that the section
-   * calls on-demand when the user clicks a probe button.
-   */
-  const resolveProbe = (): ProviderProbeRemote | undefined => {
-    try {
-      // Method 1: cordis service container
-      const svc = (ctx as unknown as { get(key: string): unknown }).get('remote:providerProbe')
-      if (svc !== undefined && svc !== null) {
-        const ns = svc as Record<string, unknown>
-        if (typeof ns.catalog === 'function' && typeof ns.probe === 'function') {
-          return ns as unknown as ProviderProbeRemote
-        }
-      }
-    } catch { /* not available */ }
-    try {
-      // Method 2: remote proxy direct access
-      const remote = c.remote as unknown as Record<string, unknown>
-      const probeNs = remote?.providerProbe as Record<string, unknown> | undefined
-      if (typeof probeNs?.catalog === 'function' && typeof probeNs?.probe === 'function') {
-        return probeNs as unknown as ProviderProbeRemote
-      }
-    } catch { /* not available */ }
-    return undefined
-  }
-
   const injected = (): SectionProps => ({
     api: c.remote.settings,
+    llm: c.remote.llm,
     t,
     events,
-    resolveProbe,
   })
 
   c.slots.inject('settings.section', () =>

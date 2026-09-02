@@ -5,16 +5,15 @@
  * `provider-pro`, order 15 — right under the official 模型 page, which is 10).
  * The section edits the `llm-pi-ai` user layer directly and holds three
  * capabilities: the reasoning-level master switch, per-provider User-Agent
- * override, and per-model image-input declaration — plus optional probe
- * buttons when dsh-provider-probe is installed.
+ * override, per-model image-input declaration, and built-in probe via
+ * the DSH LLM runtime (`remote.llm.stream()`).
  */
 import type { Context } from '@deepseek-ai/cordis';
 /**
- * Required services (cordis fiber inject). The slot registration defers on
- * `slots.inject()`, so activation order against ui-settings is not a concern.
- * The settings wire face must be declared as a dependency (`remote.settings`),
- * exactly as the official Models page does — cordis materializes `ctx.remote.settings`
- * only when the fiber injects it; reading it undeclared yields undefined.
+ * Required services (cordis fiber inject). `remote.settings` for reading
+ * and writing llm-pi-ai settings; `remote.llm` for built-in probe
+ * (streaming a minimal request through DSH's LLM runtime, which handles
+ * auth, routing, and attribution).
  */
 export declare const inject: string[];
 export declare const name = "dsh-provider-pro";

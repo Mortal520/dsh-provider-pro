@@ -18,7 +18,6 @@ import type {
   ProviderModel,
   ProviderProfile,
   ProbeResult,
-  ProviderProbeRemote,
   SettingsNamespaceView,
   SettingsPathOp,
   SettingsWireFace,
@@ -34,10 +33,19 @@ export interface SectionEvents {
 export interface SectionProps {
   /** The `ctx.remote.settings` wire face (DSH 2.0.x); undefined when absent. */
   api: SettingsWireFace | undefined
+  /** The `ctx.remote.llm` face for streaming probe requests through DSH's LLM runtime. */
+  llm?: {
+    stream(params: {
+      provider: string
+      model: string
+      messages: Array<{ role: string; content: string }>
+      system?: string
+      maxTokens?: number
+      signal?: AbortSignal
+    }): AsyncIterable<{ type: string; text?: string; usage?: { completionTokens?: number } }>
+  }
   t: T
   events: SectionEvents
-  /** Lazy probe resolver — call on-demand to resolve dsh-provider-probe's remote. */
-  resolveProbe?: () => ProviderProbeRemote | undefined
 }
 
 /** Top-level flag in the `llm-pi-ai` user layer controlling the auto-fill. */
@@ -159,6 +167,53 @@ function withoutAutoFilled(models: ProviderModel[] | undefined): ProviderModel[]
   return changed ? next : undefined
 }
 
+/* -------------------------------------------------------- probe via LLM runtime */
+
+/** Send a minimal request through DSH's LLM runtime and measure timing. */
+async function probeModel(
+  llm: NonNullable<SectionProps['llm']>,
+  provider: string,
+  model: string,
+): Promise<ProbeResult> {
+  const startedAt = performance.now()
+  let firstTokenMs: number | null = null
+  let finishReason = ''
+  let completionTokens = 0
+  try {
+    const stream = llm.stream({
+      provider,
+      model,
+      messages: [{ role: 'user', content: 'Reply with OK.' }],
+      system: 'This is a connectivity check. Reply only with OK.',
+      maxTokens: 8,
+    })
+    for await (const chunk of stream) {
+      if (chunk.type === 'text' && firstTokenMs === null) {
+        firstTokenMs = Math.round(performance.now() - startedAt)
+      }
+      if (chunk.type === 'usage' && chunk.usage?.completionTokens !== undefined) {
+        completionTokens = chunk.usage.completionTokens
+      }
+      if (chunk.type === 'finish') {
+        finishReason = (chunk as { reason?: string }).reason ?? 'stop'
+      }
+    }
+    const totalMs = Math.round(performance.now() - startedAt)
+    return { status: 'success', provider, model, firstTokenMs, totalMs, finishReason: finishReason || 'stop', usage: { completionTokens } }
+  } catch (error: unknown) {
+    const totalMs = Math.round(performance.now() - startedAt)
+    const err = error as { code?: string; message?: string; status?: number }
+    return {
+      status: 'failure', provider, model, totalMs,
+      failure: {
+        code: err.code ?? (error instanceof Error ? error.name.toUpperCase() : 'UNKNOWN'),
+        message: err.message ?? String(error),
+        status: err.status,
+      },
+    }
+  }
+}
+
 /* -------------------------------------------------------- model row (image input + probe) */
 
 function ModelRow(props: {
@@ -167,12 +222,12 @@ function ModelRow(props: {
   modelIndex: number
   revision: number
   api: SettingsWireFace
+  llm?: SectionProps['llm']
   t: T
-  resolveProbe?: () => ProviderProbeRemote | undefined
   probeResult?: ProbeResult
   onMutated: () => void
 }) {
-  const { route, profile, modelIndex, revision, api, t, resolveProbe, probeResult: probeAllResult, onMutated } = props
+  const { route, profile, modelIndex, revision, api, llm, t, probeResult: probeAllResult, onMutated } = props
   const model = profile.models?.[modelIndex]
   if (!model) return null
   const hasImage = Array.isArray(model.input) && model.input.includes('image')
@@ -202,19 +257,14 @@ function ModelRow(props: {
   }
 
   const runProbe = async () => {
-    const probeApi = resolveProbe?.()
-    if (!probeApi) {
-      setProbeResult({ status: 'failure', provider: route, model: model.id, failure: { code: 'NOT_INSTALLED', message: 'dsh-provider-probe not installed' } })
+    if (!llm) {
+      setProbeResult({ status: 'failure', provider: route, model: model.id, failure: { code: 'NO_LLM', message: 'LLM runtime not available' } })
       return
     }
     setProbeBusy(true)
     setProbeResult(undefined)
     try {
-      const response = await probeApi.probe({ provider: route, model: model.id })
-      if (response.ok) setProbeResult(response.value)
-      else setProbeResult({ status: 'failure', provider: route, model: model.id, failure: { code: 'RPC', message: response.error?.message ?? 'Unknown error' } })
-    } catch (error) {
-      setProbeResult({ status: 'failure', provider: route, model: model.id, failure: { code: 'EXCEPTION', message: String(error) } })
+      setProbeResult(await probeModel(llm, route, model.id))
     } finally {
       setProbeBusy(false)
     }
@@ -252,11 +302,11 @@ function ProviderCard(props: {
   profile: ProviderProfile
   revision: number
   api: SettingsWireFace
+  llm?: SectionProps['llm']
   t: T
-  resolveProbe?: () => ProviderProbeRemote | undefined
   onSaved: () => void
 }) {
-  const { route, profile, revision, api, t, resolveProbe, onSaved } = props
+  const { route, profile, revision, api, llm, t, onSaved } = props
   const [ua, setUa] = useState(profile.userAgent ?? '')
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -294,18 +344,12 @@ function ProviderCard(props: {
   const modelCount = profile.models?.length ?? 0
 
   const probeAll = async () => {
-    const probeApi = resolveProbe?.()
-    if (!probeApi || !profile.models?.length) return
+    if (!llm || !profile.models?.length) return
     setProbeAllBusy(true)
     setProbeAllResults(new Map())
     const results = new Map<string, ProbeResult>()
     for (const model of profile.models) {
-      try {
-        const response = await probeApi.probe({ provider: route, model: model.id })
-        results.set(model.id, response.ok ? response.value : { status: 'failure', provider: route, model: model.id, failure: { code: 'RPC', message: response.error?.message ?? 'Unknown' } })
-      } catch (error) {
-        results.set(model.id, { status: 'failure', provider: route, model: model.id, failure: { code: 'EXCEPTION', message: String(error) } })
-      }
+      results.set(model.id, await probeModel(llm, route, model.id))
       setProbeAllResults(new Map(results))
     }
     setProbeAllBusy(false)
@@ -383,8 +427,8 @@ function ProviderCard(props: {
                 modelIndex={idx}
                 revision={revision}
                 api={api}
+                llm={llm}
                 t={t}
-                resolveProbe={resolveProbe}
                 probeResult={probeAllBusy || probeAllResults.size > 0 ? probeAllResults.get(model.id) : undefined}
                 onMutated={onSaved}
               />
@@ -399,7 +443,7 @@ function ProviderCard(props: {
 /* ---------------------------------------------------------------- root UI */
 
 export function ProviderProSection(props: SectionProps) {
-  const { api, t, events, resolveProbe } = props
+  const { api, t, events, llm } = props
   ensureStyle()
 
   const [view, setView] = useState<SettingsNamespaceView>()
@@ -537,8 +581,8 @@ export function ProviderProSection(props: SectionProps) {
                 profile={providers[route] ?? {}}
                 revision={view.revision}
                 api={api}
+                llm={llm}
                 t={t}
-                resolveProbe={resolveProbe}
                 onSaved={reload}
               />
             ))
