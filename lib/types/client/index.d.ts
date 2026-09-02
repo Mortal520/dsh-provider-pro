@@ -11,9 +11,9 @@ import type { Context } from '@deepseek-ai/cordis';
 /**
  * Required services (cordis fiber inject). The slot registration defers on
  * `slots.inject()`, so activation order against ui-settings is not a concern.
- * The settings wire face is read lazily off the remote service (DSH 2.0.x
- * shape) rather than injected: an absent face degrades to a clear message in
- * the section instead of blocking plugin activation.
+ * The settings wire face must be declared as a dependency (`remote.settings`),
+ * exactly as the official Models page does — cordis materializes `ctx.remote.settings`
+ * only when the fiber injects it; reading it undeclared yields undefined.
  */
 export declare const inject: string[];
 export declare const name = "dsh-provider-pro";

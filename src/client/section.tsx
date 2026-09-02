@@ -53,8 +53,9 @@ const css = `
   display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px;
   border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px;
 }
-.dpp-switch-label { font-size: 14px; font-weight: 500; color: var(--dsw-alias-label-primary); }
-.dpp-switch-hint { margin-top: 4px; }
+.dpp-switch-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dpp-switch-label { font-size: 14px; font-weight: 500; color: var(--dsw-alias-label-primary); line-height: 20px; }
+.dpp-switch-hint { margin-top: 2px; white-space: pre-line; }
 .dpp-checkbox {
   width: 18px; height: 18px; margin: 3px 0 0; accent-color: var(--dsw-alias-button-primary-fill); flex: none;
 }
@@ -351,7 +352,7 @@ export function ProviderProSection(props: SectionProps) {
               disabled={flipBusy}
               onChange={(event) => void flipAuto(event.target.checked)}
             />
-            <span>
+            <span className="dpp-switch-body">
               <span className="dpp-switch-label">{t('autoReasoning')}</span>
               <span className="dpp-muted dpp-switch-hint">{t('autoReasoningHint')}</span>
               {flipFailure !== undefined ? (

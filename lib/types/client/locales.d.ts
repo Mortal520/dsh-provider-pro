@@ -5,7 +5,7 @@ export declare const zh: {
     readonly description: '自定义供应方的两个增强：请求级 User-Agent 覆盖，以及和官方渠道一样的模型推理等级切换（在聊天中直接切换，无需逐模型配置）。';
     readonly refresh: '刷新';
     readonly autoReasoning: '为全部自定义模型启用推理等级切换';
-    readonly autoReasoningHint: '开启（默认）：所有自定义模型在对话的模型选择器里出现推理等级切换（Off/Low/Medium/High/Max），初始档位为「Default」（请求不带思考参数、由供应方决定），随时可在聊天里切换。关闭：移除自动补全的档位回到供应方默认；你自己手动设过的等级不受影响。';
+    readonly autoReasoningHint: '开启：为所有自定义模型在聊天中提供推理等级切换（Off / Low / Medium / High / Max），默认档位 Default（不发送思考参数，由供应方决定）。\n关闭：移除自动补全的档位，恢复供应方默认；手动设置的等级不受影响。';
     readonly nsUnavailable: 'llm-pi-ai 命名空间不可用：当前组合未启用自定义供应方（模型页的“手动添加供应方”功能）。';
     readonly loadFailed: '读取设置失败';
     readonly rpcUnavailable: '设置 RPC 不可用：本插件需要 DSH Desktop 2.0+ 的 remote.settings 接口。';
@@ -27,7 +27,7 @@ export declare const en: {
     readonly description: 'Two upgrades for custom providers: a request-level User-Agent override, and official-channel-style reasoning-level switching (switched in the chat model picker — no per-model configuration needed).';
     readonly refresh: 'Refresh';
     readonly autoReasoning: 'Enable reasoning-level switching for all custom models';
-    readonly autoReasoningHint: 'On (default): every custom model gets reasoning-level switching in the chat model picker (Off/Low/Medium/High/Max), starting at "Default" (no thinking parameter sent; the provider decides) — switch any time in chat. Off: auto-filled levels are stripped back to provider defaults; levels you set manually are untouched.';
+    readonly autoReasoningHint: 'On: adds reasoning-level switching (Off / Low / Medium / High / Max) to every custom model in chat, starting at Default (no thinking parameter sent; the provider decides).\nOff: removes auto-filled levels back to provider default; manually set levels are untouched.';
     readonly nsUnavailable: 'The llm-pi-ai namespace is unavailable: this deployment does not compose custom providers.';
     readonly loadFailed: 'Failed to load settings';
     readonly rpcUnavailable: 'Settings RPC unavailable: this plugin requires the remote.settings face (DSH Desktop 2.0+).';
