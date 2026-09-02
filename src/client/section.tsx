@@ -33,16 +33,10 @@ export interface SectionEvents {
 export interface SectionProps {
   /** The `ctx.remote.settings` wire face (DSH 2.0.x); undefined when absent. */
   api: SettingsWireFace | undefined
-  /** The `ctx.remote.llm` face for streaming probe requests through DSH's LLM runtime. */
+  /** The `ctx.remote.llm` catalog face for querying model capabilities. */
   llm?: {
-    stream(params: {
-      provider: string
-      model: string
-      messages: Array<{ role: string; content: string }>
-      system?: string
-      maxTokens?: number
-      signal?: AbortSignal
-    }): AsyncIterable<{ type: string; text?: string; usage?: { completionTokens?: number } }>
+    listProviders(): Promise<Array<{ id: string }>>
+    listModels(provider: string): Promise<Array<{ id: string; inputModalities?: string[]; reasoning?: boolean; thinking?: boolean; maxTokens?: number }>>
   }
   t: T
   events: SectionEvents
@@ -167,39 +161,34 @@ function withoutAutoFilled(models: ProviderModel[] | undefined): ProviderModel[]
   return changed ? next : undefined
 }
 
-/* -------------------------------------------------------- probe via LLM runtime */
+/* -------------------------------------------------------- probe via LLM catalog */
 
-/** Send a minimal request through DSH's LLM runtime and measure timing. */
+/** Query DSH's LLM catalog for model capabilities (no actual inference). */
 async function probeModel(
   llm: NonNullable<SectionProps['llm']>,
   provider: string,
   model: string,
 ): Promise<ProbeResult> {
   const startedAt = performance.now()
-  let firstTokenMs: number | null = null
-  let finishReason = ''
-  let completionTokens = 0
   try {
-    const stream = llm.stream({
-      provider,
-      model,
-      messages: [{ role: 'user', content: 'Reply with OK.' }],
-      system: 'This is a connectivity check. Reply only with OK.',
-      maxTokens: 8,
-    })
-    for await (const chunk of stream) {
-      if (chunk.type === 'text' && firstTokenMs === null) {
-        firstTokenMs = Math.round(performance.now() - startedAt)
-      }
-      if (chunk.type === 'usage' && chunk.usage?.completionTokens !== undefined) {
-        completionTokens = chunk.usage.completionTokens
-      }
-      if (chunk.type === 'finish') {
-        finishReason = (chunk as { reason?: string }).reason ?? 'stop'
-      }
-    }
+    const models = await llm.listModels(provider)
+    const found = models.find(m => m.id === model)
     const totalMs = Math.round(performance.now() - startedAt)
-    return { status: 'success', provider, model, firstTokenMs, totalMs, finishReason: finishReason || 'stop', usage: { completionTokens } }
+    if (!found) {
+      return { status: 'failure', provider, model, totalMs, failure: { code: 'NOT_FOUND', message: `Model "${model}" not found in provider "${provider}" catalog` } }
+    }
+    // Build capability summary from catalog metadata
+    const caps: string[] = []
+    if (found.inputModalities?.includes('image')) caps.push('image')
+    if (found.inputModalities?.includes('text')) caps.push('text')
+    if (found.reasoning) caps.push('reasoning')
+    if (found.maxTokens) caps.push(`maxTokens:${found.maxTokens}`)
+    return {
+      status: 'success', provider, model, totalMs,
+      firstTokenMs: null,
+      finishReason: caps.length ? `capabilities: ${caps.join(', ')}` : 'catalog-ok',
+      usage: { completionTokens: 0 },
+    }
   } catch (error: unknown) {
     const totalMs = Math.round(performance.now() - startedAt)
     const err = error as { code?: string; message?: string; status?: number }

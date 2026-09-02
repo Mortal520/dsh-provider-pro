@@ -44,14 +44,8 @@ interface ClientServices {
     $on(event: string, handler: (ns?: unknown) => void): () => void
     settings?: SettingsWireFace
     llm?: {
-      stream(params: {
-        provider: string
-        model: string
-        messages: Array<{ role: string; content: string }>
-        system?: string
-        maxTokens?: number
-        signal?: AbortSignal
-      }): AsyncIterable<{ type: string; text?: string; usage?: { completionTokens?: number } }>
+      listProviders(): Promise<Array<{ id: string }>>
+      listModels(provider: string): Promise<Array<{ id: string; inputModalities?: string[]; reasoning?: boolean; thinking?: boolean; maxTokens?: number }>>
     }
   }
 }
