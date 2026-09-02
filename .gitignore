@@ -16,5 +16,8 @@ Thumbs.db
 .idea/
 .vscode/
 
+# local working files (forum post draft — not part of the plugin)
+LINUXDO_POST.md
+
 # note: lib/ IS committed on purpose — it is the published build artifact
 # (README "构建" section), so a git install works without running build.

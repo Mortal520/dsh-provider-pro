@@ -4,10 +4,12 @@
  * Gives every hand-declared provider route in the `llm-pi-ai` settings
  * namespace a custom `User-Agent` that actually reaches the wire.
  *
- * Why a global fetch patch: the pi-ai adapter filters any case variant of
- * `user-agent` out of a profile's `headers` and appends the harness
- * attribution header afterwards (`requestHeaders()` in dsh-llm-pi-ai), so a
- * User-Agent stored in `headers` can never win. The provider SDKs
+ * Why a global fetch patch: the harness attribution header wins by design.
+ * In older builds pi-ai's `requestHeaders()` filtered any case variant of
+ * `user-agent` out of a profile's `headers`; in DSH 2.0.x the attribution
+ * headers come from `@deepseek-ai/dsh-llm` and pi-ai's header merge strips
+ * case-insensitive collisions with them — either way a User-Agent stored in
+ * `headers` can never win. The provider SDKs
  * (openai/anthropic) construct their HTTP clients with `fetch` taken from the
  * global at construction time, which makes a minimal, URL-scoped patch of
  * `globalThis.fetch` the one plugin-reachable injection point. The patch only

@@ -8,6 +8,12 @@ A DeepSeek Harness plugin that gives custom providers (hand-added via the
 `llm-pi-ai` provider) two capabilities that official channels already have —
 out of the box, with no per-model configuration.
 
+> **兼容性**：已对照 DSH Desktop 2.0.4（harness `0.1.2-alpha.1`、cordis `4.0.1`）
+> 逐面核验（settings 服务、RPC、`settings.section` 槽、ModuleLoader bundle 协议、
+> 设计令牌、pi-ai 推理词典语义），并兼容更早的 profile 包布局。
+> Verified surface-by-surface against DSH Desktop 2.0.4 (harness 0.1.2-alpha.1,
+> cordis 4.0.1); also compatible with the earlier profile-based package layout.
+
 ---
 
 ## 中文

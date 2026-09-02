@@ -8,14 +8,15 @@ const PLUGIN_ID = 'dsh-provider-pro'
 
 // Platform modules this bundle may `require()` at runtime. Everything else
 // (including any other @deepseek-ai/* value import) is forbidden by the
-// purity gate below.
+// purity gate below. `@deepseek-ai/dsh-client-runtime` was removed in DSH
+// Desktop 2.0.x (the module system now lives in dsh-client-modules), so it is
+// no longer a valid external; this bundle only ever requires react seeds.
 const CLIENT_EXTERNALS = [
   'react',
   'react/jsx-runtime',
   'react-dom',
   'react-dom/client',
   '@deepseek-ai/cordis',
-  '@deepseek-ai/dsh-client-runtime/client',
   '@deepseek-ai/dsh-client-ui-slots',
 ] as const
 

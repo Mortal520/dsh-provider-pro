@@ -2,7 +2,35 @@
 
 All notable changes to dsh-provider-pro.
 
-## [0.1.0] - 2025-01-11
+## [0.2.0] - 2026-09-02
+
+### Compatibility
+- Verified surface-by-surface against **DSH Desktop 2.0.4** (harness
+  `0.1.2-alpha.1`, cordis `4.0.1`): the `settings.section` slot, the
+  ModuleLoader client-bundle protocol (now hosted by `dsh-client-modules`),
+  the settings service (`get`/`section`/`mutate` + `settings/updated`), the
+  client RPC surface (`settings.describe`/`settings.mutate`, forwarded
+  `settings/document-updated`/`llm/adapters-updated`), all 13 design tokens,
+  and the pi-ai `reasoningEfforts` → `thinkingLevelMap` semantics are
+  unchanged. No code change was required.
+- Attribution handling in 2.0.x moved to `@deepseek-ai/dsh-llm`
+  (`attributionHeaders()`); pi-ai's header merge still strips
+  case-insensitive collisions from user headers, so the fetch-level UA
+  replacement remains both necessary and effective.
+
+### Changed
+- Removed the stale `@deepseek-ai/dsh-client-runtime` reference from
+  `dsh.client.inject` — the package no longer ships with DSH Desktop 2.0.x
+  (the module system now lives in `dsh-client-modules`). The bundle only ever
+  required `react`/`react/jsx-runtime` seed modules, so loading was never
+  affected; this is a manifest cleanup.
+- Updated the tsdown externals allow-list to the current DSH 2.0.x platform
+  surface (`dsh-client-runtime/client` dropped).
+- `prepare`/`prepack` now invoke `tsc`/`tsdown` directly instead of
+  `npm run build`, so git installs work under any package manager.
+- README: bilingual compatibility note + LINUX DO community link.
+
+## [0.1.0] - 2026-08-20
 
 ### Added
 - **Request-level User-Agent override** per custom provider (stored as
