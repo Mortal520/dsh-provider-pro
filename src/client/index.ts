@@ -86,40 +86,38 @@ export function apply(ctx: Context) {
   })
 
   /**
-   * Probe detection: resolve dsh-provider-probe's typert remote namespace
-   * (`providerProbe`) through the cordis service container. The gateway
-   * registers typert remote services under the key `remote:<namespace>`,
-   * so we try `ctx.get('remote:providerProbe')`. If unavailable (probe
-   * not installed), probe features are hidden (soft dependency).
+   * Probe resolution: instead of detecting the probe remote at activation
+   * time (which may be too early for the gateway to have registered the
+   * typert remote descriptors), we pass a lazy resolver that the section
+   * calls on-demand when the user clicks a probe button.
    */
-  let probeApi: ProviderProbeRemote | undefined
-  try {
-    // Method 1: cordis service resolution (most reliable)
-    const svc = (ctx as unknown as { get(key: string): unknown }).get('remote:providerProbe')
-    if (svc !== undefined && svc !== null) {
-      const ns = svc as Record<string, unknown>
-      if (typeof ns.catalog === 'function' && typeof ns.probe === 'function') {
-        probeApi = ns as unknown as ProviderProbeRemote
-      }
-    }
-  } catch {
-    // Method 2: try the remote proxy directly (fallback)
+  const resolveProbe = (): ProviderProbeRemote | undefined => {
     try {
+      // Method 1: cordis service container
+      const svc = (ctx as unknown as { get(key: string): unknown }).get('remote:providerProbe')
+      if (svc !== undefined && svc !== null) {
+        const ns = svc as Record<string, unknown>
+        if (typeof ns.catalog === 'function' && typeof ns.probe === 'function') {
+          return ns as unknown as ProviderProbeRemote
+        }
+      }
+    } catch { /* not available */ }
+    try {
+      // Method 2: remote proxy direct access
       const remote = c.remote as unknown as Record<string, unknown>
       const probeNs = remote?.providerProbe as Record<string, unknown> | undefined
       if (typeof probeNs?.catalog === 'function' && typeof probeNs?.probe === 'function') {
-        probeApi = probeNs as unknown as ProviderProbeRemote
+        return probeNs as unknown as ProviderProbeRemote
       }
-    } catch {
-      // probe not available — silently degrade
-    }
+    } catch { /* not available */ }
+    return undefined
   }
 
   const injected = (): SectionProps => ({
     api: c.remote.settings,
     t,
     events,
-    probeApi,
+    resolveProbe,
   })
 
   c.slots.inject('settings.section', () =>

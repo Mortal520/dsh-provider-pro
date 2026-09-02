@@ -9,7 +9,7 @@ export interface SectionProps {
     api: SettingsWireFace | undefined;
     t: T;
     events: SectionEvents;
-    /** Probe remote from dsh-provider-probe; undefined when not installed. */
-    probeApi?: ProviderProbeRemote;
+    /** Lazy probe resolver — call on-demand to resolve dsh-provider-probe's remote. */
+    resolveProbe?: () => ProviderProbeRemote | undefined;
 }
 export declare function ProviderProSection(props: SectionProps): import("react").JSX.Element;

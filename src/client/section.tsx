@@ -36,8 +36,8 @@ export interface SectionProps {
   api: SettingsWireFace | undefined
   t: T
   events: SectionEvents
-  /** Probe remote from dsh-provider-probe; undefined when not installed. */
-  probeApi?: ProviderProbeRemote
+  /** Lazy probe resolver — call on-demand to resolve dsh-provider-probe's remote. */
+  resolveProbe?: () => ProviderProbeRemote | undefined
 }
 
 /** Top-level flag in the `llm-pi-ai` user layer controlling the auto-fill. */
@@ -168,11 +168,11 @@ function ModelRow(props: {
   revision: number
   api: SettingsWireFace
   t: T
-  probeApi?: ProviderProbeRemote
+  resolveProbe?: () => ProviderProbeRemote | undefined
   probeResult?: ProbeResult
   onMutated: () => void
 }) {
-  const { route, profile, modelIndex, revision, api, t, probeApi, probeResult: probeAllResult, onMutated } = props
+  const { route, profile, modelIndex, revision, api, t, resolveProbe, probeResult: probeAllResult, onMutated } = props
   const model = profile.models?.[modelIndex]
   if (!model) return null
   const hasImage = Array.isArray(model.input) && model.input.includes('image')
@@ -202,7 +202,11 @@ function ModelRow(props: {
   }
 
   const runProbe = async () => {
-    if (!probeApi) return
+    const probeApi = resolveProbe?.()
+    if (!probeApi) {
+      setProbeResult({ status: 'failure', provider: route, model: model.id, failure: { code: 'NOT_INSTALLED', message: 'dsh-provider-probe not installed' } })
+      return
+    }
     setProbeBusy(true)
     setProbeResult(undefined)
     try {
@@ -227,11 +231,9 @@ function ModelRow(props: {
         />
         <span className="dpp-model-cb-label">{t('imageInput')}</span>
       </label>
-      {probeApi ? (
-        <button type="button" className="dpp-probe-btn" disabled={probeBusy} onClick={() => void runProbe()}>
-          {probeBusy ? t('probing') : t('probe')}
-        </button>
-      ) : null}
+      <button type="button" className="dpp-probe-btn" disabled={probeBusy} onClick={() => void runProbe()}>
+        {probeBusy ? t('probing') : t('probe')}
+      </button>
       {displayResult ? (
         <span className={'dpp-probe-result ' + (displayResult.status === 'success' ? 'dpp-probe-ok' : 'dpp-probe-fail')}>
           {displayResult.status === 'success'
@@ -251,10 +253,10 @@ function ProviderCard(props: {
   revision: number
   api: SettingsWireFace
   t: T
-  probeApi?: ProviderProbeRemote
+  resolveProbe?: () => ProviderProbeRemote | undefined
   onSaved: () => void
 }) {
-  const { route, profile, revision, api, t, probeApi, onSaved } = props
+  const { route, profile, revision, api, t, resolveProbe, onSaved } = props
   const [ua, setUa] = useState(profile.userAgent ?? '')
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -292,6 +294,7 @@ function ProviderCard(props: {
   const modelCount = profile.models?.length ?? 0
 
   const probeAll = async () => {
+    const probeApi = resolveProbe?.()
     if (!probeApi || !profile.models?.length) return
     setProbeAllBusy(true)
     setProbeAllResults(new Map())
@@ -367,11 +370,9 @@ function ProviderCard(props: {
         <div className="dpp-models">
           <div className="dpp-models-title">
             <span>{t('models')}（{modelCount}）</span>
-            {probeApi ? (
-              <button type="button" className="dpp-probe-btn" disabled={probeAllBusy} onClick={() => void probeAll()}>
-                {probeAllBusy ? t('probing') : t('probeAll')}
-              </button>
-            ) : null}
+            <button type="button" className="dpp-probe-btn" disabled={probeAllBusy} onClick={() => void probeAll()}>
+              {probeAllBusy ? t('probing') : t('probeAll')}
+            </button>
           </div>
           <div className="dpp-models-scroll">
             {profile.models.map((model, idx) => (
@@ -383,7 +384,7 @@ function ProviderCard(props: {
                 revision={revision}
                 api={api}
                 t={t}
-                probeApi={probeApi}
+                resolveProbe={resolveProbe}
                 probeResult={probeAllBusy || probeAllResults.size > 0 ? probeAllResults.get(model.id) : undefined}
                 onMutated={onSaved}
               />
@@ -398,7 +399,7 @@ function ProviderCard(props: {
 /* ---------------------------------------------------------------- root UI */
 
 export function ProviderProSection(props: SectionProps) {
-  const { api, t, events, probeApi } = props
+  const { api, t, events, resolveProbe } = props
   ensureStyle()
 
   const [view, setView] = useState<SettingsNamespaceView>()
@@ -537,7 +538,7 @@ export function ProviderProSection(props: SectionProps) {
                 revision={view.revision}
                 api={api}
                 t={t}
-                probeApi={probeApi}
+                resolveProbe={resolveProbe}
                 onSaved={reload}
               />
             ))
