@@ -26,8 +26,8 @@ out of the box, with no per-model configuration.
    应对按 UA 限流、或禁止非官方终端应用访问的供应方。
 2. **推理等级切换** — 与官方渠道一样的思考等级下拉。数据层自动完成：
    Host 半自动为每个缺少 `reasoningEfforts` 的自定义模型写入五档词典
-   （`off` → `null`，`low/medium/high/max` → 同名值；0.2.x 及更早自动补的
-   七档词典会被自动迁移为五档），对话模型选择器随即出现推理等级行；
+   （`off` → `null`，`low/medium/high/max` → 同名值），
+   对话模型选择器随即出现推理等级行；
    `defaultEffort` 不写 → 初始档位为 **Default**（请求不带思考参数，由供应方
    自行决定）。切换发生在聊天里，无需设置。
 
@@ -114,10 +114,9 @@ pnpm run smoke    # Host 行为冒烟（fetch 补丁 / 补档器 / 总开关）
 2. **Reasoning-level switching** — the same reasoning picker as the official
    channels (off / low / medium / high / max). Fully data-driven, no per-model
    setup: the host fills a five-level `reasoningEfforts` dictionary for every
-   hand-declared custom model that lacks one (byte-exact seven-level
-   dictionaries from 0.2.x and earlier migrate down automatically) and keeps
-   `defaultEffort` unset, so the picker preselects **Default** (no thinking
-   parameter is sent; the provider decides). Switch levels any time in chat.
+   hand-declared custom model that lacks one and keeps `defaultEffort` unset,
+   so the picker preselects **Default** (no thinking parameter is sent; the
+   provider decides). Switch levels any time in chat.
 
 ### Install
 
