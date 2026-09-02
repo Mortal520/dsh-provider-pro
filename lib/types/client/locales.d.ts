@@ -31,6 +31,7 @@ export declare const zh: {
     readonly probeError: '错误';
     readonly probeNotInstalled: '未安装 dsh-provider-probe，探测功能不可用。';
     readonly probe: '探测';
+    readonly probeAll: '一键探测';
 };
 export declare const en: {
     readonly nav: 'Model Enhance';
@@ -64,5 +65,6 @@ export declare const en: {
     readonly probeError: 'Error';
     readonly probeNotInstalled: 'dsh-provider-probe not installed — probe features unavailable.';
     readonly probe: 'Probe';
+    readonly probeAll: 'Probe all';
 };
 export type LocaleKey = keyof typeof zh | keyof typeof en;

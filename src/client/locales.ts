@@ -31,6 +31,7 @@ export const zh = {
   probeError: '错误',
   probeNotInstalled: '未安装 dsh-provider-probe，探测功能不可用。',
   probe: '探测',
+  probeAll: '一键探测',
 } as const
 
 export const en = {
@@ -65,6 +66,7 @@ export const en = {
   probeError: 'Error',
   probeNotInstalled: 'dsh-provider-probe not installed — probe features unavailable.',
   probe: 'Probe',
+  probeAll: 'Probe all',
 } as const
 
 export type LocaleKey = keyof typeof zh | keyof typeof en
