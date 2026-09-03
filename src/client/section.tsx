@@ -173,17 +173,20 @@ async function probeModel(
 ): Promise<ProbeResult> {
   const startedAt = performance.now()
   try {
-    // DSH remote.llm exposes discoverModels (not listModels)
-    const discoverModelsFn = (llmWire.discoverModels ?? llmWire.listModels) as ((provider: string) => Promise<Array<{ id: string; inputModalities?: string[]; reasoning?: boolean; thinking?: boolean; maxTokens?: number }>>) | undefined
+    // DSH remote.llm exposes discoverModels(provider, model)
+    const discoverModelsFn = (llmWire.discoverModels ?? llmWire.listModels) as ((provider: string, model: string) => Promise<Array<{ id: string; inputModalities?: string[]; reasoning?: boolean; thinking?: boolean; maxTokens?: number }>>) | undefined
     if (typeof discoverModelsFn !== 'function') {
       const keys = Object.keys(llmWire)
       const fnKeys = keys.filter(k => typeof llmWire[k] === 'function')
       const totalMs = Math.round(performance.now() - startedAt)
       return { status: 'failure', provider, model, totalMs, failure: { code: 'NO_DISCOVER', message: `No model discovery method. Keys: [${keys.join(', ')}] | Fns: [${fnKeys.join(', ')}]` } }
     }
-    const models = await discoverModelsFn(provider)
-    const found = models.find(m => m.id === model)
+    const result = await discoverModelsFn(provider, model)
     const totalMs = Math.round(performance.now() - startedAt)
+    // discoverModels may return a single model info or an array
+    const found = Array.isArray(result)
+      ? result.find(m => m.id === model) ?? result[0]
+      : result as { id: string; inputModalities?: string[]; reasoning?: boolean; thinking?: boolean; maxTokens?: number } | undefined
     if (!found) {
       return { status: 'failure', provider, model, totalMs, failure: { code: 'NOT_FOUND', message: `Model "${model}" not in provider "${provider}" catalog` } }
     }
