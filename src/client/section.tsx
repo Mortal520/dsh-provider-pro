@@ -189,7 +189,8 @@ async function probeModel(
     const found = models.find((m: DiscResult) => m.id === model)
     const totalMs = Math.round(performance.now() - startedAt)
     if (!found) {
-      return { status: 'failure', provider, model, totalMs, failure: { code: 'NOT_FOUND', message: `Model "${model}" not discoverable via provider "${provider}"` } }
+      const discovered = models.map((m: DiscResult) => m.id).join(', ')
+      return { status: 'failure', provider, model, totalMs, failure: { code: 'NOT_FOUND', message: `Model "${model}" not in discovered list (${models.length} found: ${discovered || '(empty)'})` } }
     }
     const caps: string[] = []
     if (found.name && found.name !== found.id) caps.push(`name: ${found.name}`)
