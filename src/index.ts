@@ -405,8 +405,9 @@ export function apply(ctx: Context) {
               if (entry.maxTokens === undefined && disc.maxTokens !== undefined) { copy.maxTokens = disc.maxTokens; changed = true }
               return copy
             })
-            if (changed) {
-              await settingsApi(ctx)!.mutate(NS, [{ op: 'set', path: ['providers', provider, 'models'], value: next }])
+            const backfillApi = settingsApi(ctx)
+          if (changed && backfillApi !== undefined) {
+              await backfillApi.mutate(NS, [{ op: 'set', path: ['providers', provider, 'models'], value: next }])
               backfilled = next.reduce((n, e, i) => n + (e.contextWindow !== models[i]?.contextWindow || e.maxTokens !== models[i]?.maxTokens ? 1 : 0), 0)
             }
           }

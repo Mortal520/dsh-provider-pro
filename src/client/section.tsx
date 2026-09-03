@@ -33,8 +33,6 @@ export interface SectionEvents {
 export interface SectionProps {
   /** The `ctx.remote.settings` wire face (DSH 2.0.x); undefined when absent. */
   api: SettingsWireFace | undefined
-  /** Raw remote.llm wire — discovered at runtime; methods TBD. */
-  llmWire?: Record<string, unknown>
   t: T
   events: SectionEvents
 }
@@ -186,17 +184,20 @@ interface HostProbeResult {
  * Ask the host half to run a real probe through DSH's LLM runtime. The host
  * (a) mints a 1×1 PNG attachment, (b) streams a minimal request carrying it,
  * and (c) writes the result back to the `dshProviderProProbeResult` settings
- * slot. The client (this function) writes the request, then polls the result
- * slot until the request id is answered or the timeout elapses.
+ * slot. The client (this function) writes the request, then waits for the
+ * settings event (which fires when the host publishes the result) up to a
+ * timeout.
  *
  * IPC path: both halves exchange through the llm-pi-ai user layer — the host
  * listens to `settings/updated`, consumes `PROBE_REQ_FLAG`, and publishes
- * `PROBE_RESULT_FLAG`.
+ * `PROBE_RESULT_FLAG`. The `events` bus re-emits `settings/document-updated`
+ * so we wake on the host's write instead of busy-polling `describe()`.
  */
 async function sendProbeRequest(
   api: SettingsWireFace,
   provider: string,
   model: string,
+  events: SectionEvents,
 ): Promise<ProbeResult> {
   const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   // Clear any stale result for this probe; write the request. The host reacts
@@ -207,47 +208,68 @@ async function sendProbeRequest(
   if (!write.ok) {
     return { status: 'failure', provider, model, failure: { code: 'WRITE_FAIL', message: write.error?.message ?? 'probe request write failed' } }
   }
-  // Poll for the answer, capped at ~12s (probe should be a tiny request).
-  const deadline = Date.now() + 12000
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 250))
+
+  /** Read the probe-result slot from the freshest settings view. */
+  const readSlot = async (): Promise<HostProbeResult | undefined> => {
     const view = await api.describe().then((r) => (r.ok ? r.value : undefined)).catch(() => undefined)
     const ns = view?.namespaces.find((entry) => entry.ns === NS)
     const user = (ns?.user ?? ns?.value ?? {}) as Record<string, unknown>
     const slot = user[PROBE_RESULT_FLAG]
-    if (slot !== undefined && typeof slot === 'object') {
-      const result = slot as HostProbeResult
-      if (result.id === id) {
-        if (!result.ok) {
-          return {
-            status: 'failure', provider, model, totalMs: result.totalMs,
-            failure: {
-              code: result.imageSupported === false ? 'IMAGE_UNSUPPORTED' : 'PROBE_FAIL',
-              message: result.error ?? (result.imageSupported === false ? 'model does not accept image input' : 'probe failed'),
-            },
-          }
-        }
-        const caps: string[] = []
-        if (result.contextWindow !== undefined) caps.push(`ctx: ${result.contextWindow}`)
-        if (result.maxTokens !== undefined) caps.push(`max: ${result.maxTokens}`)
-        caps.push(`first-token: ${result.firstTokenMs ?? 'n/a'}ms`)
-        if (result.totalMs !== undefined) caps.push(`total: ${result.totalMs}ms`)
-        caps.push(`reason: ${result.finishReason ?? 'stop'}`)
-        if (result.imageProbe) caps.push('image: accepted')
-        if (result.backfilled !== undefined && result.backfilled > 0) caps.push(`backfilled: ${result.backfilled}`)
-        return {
-          status: 'success', provider, model, totalMs: result.totalMs,
-          firstTokenMs: result.firstTokenMs,
-          finishReason: caps.join(' · '),
-          usage: {},
-        }
-      }
+    if (slot === undefined || typeof slot !== 'object') return undefined
+    const result = slot as HostProbeResult
+    return result.id === id ? result : undefined
+  }
+
+  // Wait on the settings event (host writes the result) with a timeout cap.
+  const answer = await new Promise<HostProbeResult | undefined>((resolve) => {
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let disposer: (() => void) | undefined
+    const done = (value: HostProbeResult | undefined) => {
+      if (settled) return
+      settled = true
+      if (timer !== undefined) clearTimeout(timer)
+      disposer?.()
+      resolve(value)
+    }
+    disposer = events.on(() => {
+      void readSlot().then(done)
+    })
+    timer = setTimeout(() => done(undefined), 12000)
+    // One immediate read in case the result already landed before we attached.
+    void readSlot().then((value) => { if (value !== undefined) done(value) })
+  })
+
+  if (answer === undefined) {
+    // Timeout: likely the host probe never ran (LLM runtime absent) or the
+    // request is stuck. Clean the request slot so a retry re-fires.
+    void api.mutate(NS, [{ op: 'unset', path: [PROBE_REQ_FLAG] }]).catch(() => undefined)
+    return { status: 'failure', provider, model, failure: { code: 'TIMEOUT', message: 'probe timed out (host probe did not respond)' } }
+  }
+
+  if (!answer.ok) {
+    return {
+      status: 'failure', provider, model, totalMs: answer.totalMs,
+      failure: {
+        code: answer.imageSupported === false ? 'IMAGE_UNSUPPORTED' : 'PROBE_FAIL',
+        message: answer.error ?? (answer.imageSupported === false ? 'model does not accept image input' : 'probe failed'),
+      },
     }
   }
-  // Timeout: likely the host probe never ran (LLM runtime absent) or the
-  // request is stuck. Clean the request slot so a retry re-fires.
-  void api.mutate(NS, [{ op: 'unset', path: [PROBE_REQ_FLAG] }]).catch(() => undefined)
-  return { status: 'failure', provider, model, failure: { code: 'TIMEOUT', message: 'probe timed out (host probe did not respond)' } }
+  const caps: string[] = []
+  if (answer.contextWindow !== undefined) caps.push(`ctx: ${answer.contextWindow}`)
+  if (answer.maxTokens !== undefined) caps.push(`max: ${answer.maxTokens}`)
+  caps.push(`first-token: ${answer.firstTokenMs ?? 'n/a'}ms`)
+  if (answer.totalMs !== undefined) caps.push(`total: ${answer.totalMs}ms`)
+  caps.push(`reason: ${answer.finishReason ?? 'stop'}`)
+  if (answer.imageProbe) caps.push('image: accepted')
+  if (answer.backfilled !== undefined && answer.backfilled > 0) caps.push(`backfilled: ${answer.backfilled}`)
+  return {
+    status: 'success', provider, model, totalMs: answer.totalMs,
+    firstTokenMs: answer.firstTokenMs,
+    finishReason: caps.join(' · '),
+    usage: {},
+  }
 }
 
 /* -------------------------------------------------------- model row (image input + probe) */
@@ -258,12 +280,12 @@ function ModelRow(props: {
   modelIndex: number
   revision: number
   api: SettingsWireFace
-  llmWire?: Record<string, unknown>
+  events: SectionEvents
   t: T
   probeResult?: ProbeResult
   onMutated: () => void
 }) {
-  const { route, profile, modelIndex, revision, api, llmWire, t, probeResult: probeAllResult, onMutated } = props
+  const { route, profile, modelIndex, revision, api, events, t, probeResult: probeAllResult, onMutated } = props
   const model = profile.models?.[modelIndex]
   if (!model) return null
   const hasImage = Array.isArray(model.input) && model.input.includes('image')
@@ -296,7 +318,7 @@ function ModelRow(props: {
     setProbeBusy(true)
     setProbeResult(undefined)
     try {
-      setProbeResult(await sendProbeRequest(api, route, model.id))
+      setProbeResult(await sendProbeRequest(api, route, model.id, events))
     } catch (error: unknown) {
       const err = error as { message?: string }
       setProbeResult({ status: 'failure', provider: route, model: model.id, totalMs: 0, failure: { code: 'ERROR', message: err.message ?? String(error) } })
@@ -337,11 +359,11 @@ function ProviderCard(props: {
   profile: ProviderProfile
   revision: number
   api: SettingsWireFace
-  llmWire?: Record<string, unknown>
+  events: SectionEvents
   t: T
   onSaved: () => void
 }) {
-  const { route, profile, revision, api, llmWire, t, onSaved } = props
+  const { route, profile, revision, api, events, t, onSaved } = props
   const [ua, setUa] = useState(profile.userAgent ?? '')
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -385,7 +407,7 @@ function ProviderCard(props: {
     setProbeAllResults(new Map())
     const results = new Map<string, ProbeResult>()
     for (const model of profile.models) {
-      results.set(model.id, await sendProbeRequest(api, route, model.id))
+      results.set(model.id, await sendProbeRequest(api, route, model.id, events))
       setProbeAllResults(new Map(results))
     }
     setProbeAllBusy(false)
@@ -469,7 +491,7 @@ function ProviderCard(props: {
                   modelIndex={idx}
                   revision={revision}
                   api={api}
-                  llmWire={llmWire}
+                  events={events}
                   t={t}
                   probeResult={probeAllBusy || probeAllResults.size > 0 ? probeAllResults.get(model.id) : undefined}
                   onMutated={onSaved}
@@ -486,7 +508,7 @@ function ProviderCard(props: {
 /* ---------------------------------------------------------------- root UI */
 
 export function ProviderProSection(props: SectionProps) {
-  const { api, t, events, llmWire } = props
+  const { api, t, events } = props
   ensureStyle()
 
   const [view, setView] = useState<SettingsNamespaceView>()
@@ -624,7 +646,7 @@ export function ProviderProSection(props: SectionProps) {
                 profile={providers[route] ?? {}}
                 revision={view.revision}
                 api={api}
-                llmWire={llmWire}
+                events={events}
                 t={t}
                 onSaved={reload}
               />

@@ -77,7 +77,7 @@ export interface SettingsWireFace {
 }
 /** A t() with a pluggable [untranslated] fallback for unknown keys. */
 export type TFallback = (key: LocaleKey) => string;
-/** Result of a single model probe (mirrors dsh-provider-probe's ProbeResult). */
+/** Result of a single model probe. */
 export interface ProbeResult {
     status: 'success' | 'failure';
     provider: string;
@@ -96,30 +96,5 @@ export interface ProbeResult {
         category?: string;
         status?: number;
     };
-}
-/** Minimal shape of the providerProbe remote namespace exposed by dsh-provider-probe. */
-export interface ProviderProbeRemote {
-    catalog(): Promise<{
-        ok: boolean;
-        value: {
-            providers: Array<{
-                id: string;
-                models: Array<{
-                    id: string;
-                    inputModalities?: string[];
-                }>;
-            }>;
-        };
-    }>;
-    probe(request: {
-        provider: string;
-        model: string;
-    }, signal?: AbortSignal): Promise<{
-        ok: boolean;
-        value: ProbeResult;
-        error?: {
-            message: string;
-        };
-    }>;
 }
 export {};

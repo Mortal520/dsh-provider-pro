@@ -7,8 +7,6 @@ export interface SectionEvents {
 export interface SectionProps {
     /** The `ctx.remote.settings` wire face (DSH 2.0.x); undefined when absent. */
     api: SettingsWireFace | undefined;
-    /** Raw remote.llm wire — discovered at runtime; methods TBD. */
-    llmWire?: Record<string, unknown>;
     t: T;
     events: SectionEvents;
 }

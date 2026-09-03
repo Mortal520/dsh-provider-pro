@@ -9,15 +9,26 @@ All notable changes to dsh-provider-pro.
   "Support image input" checkbox; checking it writes
   `input: [text, image]` to the model entry in `settings.yaml`
   so DSH allows image attachments for that model.
-- **Provider probe integration** (soft dependency): when
-  `dsh-provider-probe` is installed, each model row gains a
-  "Probe" button that calls `providerProbe/probe` via typert
-  remote and displays first-token latency, total time, and
-  finish reason.
+- **Built-in host-side probe**: each model row gains a "Probe"
+  button (plus a provider-wide "Probe all") that asks the host
+  half to run a real minimal request through DSH's LLM runtime —
+  carrying a 1×1 PNG to exercise image admission — and reports
+  first-token latency, total time, finish reason, and whether the
+  upstream accepted the image. Host and client exchange through
+  the `llm-pi-ai` user layer (settings IPC), so no extra service
+  or process restart is needed.
+- **Context-window auto-fill**: the probe also runs model
+  discovery (`/v1/models`) for the provider and backfills
+  `contextWindow`/`maxTokens` into any declared model that lacks
+  them — hand-set values are never overwritten.
 
 ### Changed
 - Provider cards now render the full model list below the
-  User-Agent field.
+  User-Agent field (collapsed by default).
+- **Debt cleanup**: removed the dead `dsh-provider-probe` soft
+  dependency, the unused `llmWire` client prop threading, and
+  unused locale keys; probe waiting is now event-driven instead
+  of polling `describe()`.
 
 ## [0.3.0] - 2026-09-02
 

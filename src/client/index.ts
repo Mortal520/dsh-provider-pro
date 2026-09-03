@@ -19,14 +19,9 @@ const NS_LOCALE = 'dsh-provider-pro'
 
 /**
  * Required services (cordis fiber inject). `remote.settings` for reading
- * and writing llm-pi-ai settings; `remote.llm` for built-in probe
- * (querying model capabilities through DSH's LLM catalog).
- *
- * `remote.llm` is a typert remote catalog proxy exposing listProviders()
- * and listModels(provider). The client-side proxy does NOT expose stream()
- * or chat() — those run host-side only.
+ * and writing llm-pi-ai settings.
  */
-export const inject = ['slots', 'locale', 'remote', 'remote.settings', 'remote.llm']
+export const inject = ['slots', 'locale', 'remote', 'remote.settings']
 
 /**
  * Cordis service surfaces this bundle consumes. Local structural types keep
@@ -46,8 +41,6 @@ interface ClientServices {
   remote: {
     $on(event: string, handler: (ns?: unknown) => void): () => void
     settings?: SettingsWireFace
-    /** LLM catalog proxy — injected via fiber. Methods depend on DSH version. */
-    llm?: Record<string, unknown>
   }
 }
 
@@ -91,7 +84,6 @@ export function apply(ctx: Context) {
 
   const injected = (): SectionProps => ({
     api: c.remote.settings,
-    llmWire: c.remote.llm,
     t,
     events,
   })
