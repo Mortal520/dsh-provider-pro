@@ -175,19 +175,41 @@ interface ProbeChunk {
  * 1×1 PNG (image admission exercised on the actual wire) plus a text request
  * fallback when no attachment store is mounted. Measures first-token latency,
  * total time, and whether the upstream rejected the image.
+ *
+ * Alongside the latency probe it runs model discovery for the provider and
+ * includes each model's `contextWindow`/`maxTokens` so the client can show
+ * them and backfill any model that lacks them in settings.
  */
 async function runProbe(
   ctx: Context,
   provider: string,
+  baseURL: string | undefined,
   model: string,
 ): Promise<Record<string, unknown>> {
   const startedAt = Date.now()
   const llm = (ctx as unknown as { get(key: string): unknown }).get('llm') as
-    | { stream(options: unknown): AsyncIterable<ProbeChunk> }
+    | {
+        stream(options: unknown): AsyncIterable<ProbeChunk>
+        discoverModels(ns: string, request: { provider?: string; baseURL?: string }, signal?: AbortSignal): Promise<Array<{ id: string; contextWindow?: number; maxTokens?: number }>>
+      }
     | undefined
   if (llm === undefined || typeof llm.stream !== 'function') {
     return { ok: false, error: 'LLM runtime not available' }
   }
+
+  // Discover the provider's models (contextWindow/maxTokens) so we can
+  // surface and, where missing, backfill capacity. The discovery handler
+  // resolves the API key from storage; only provider + baseURL are required.
+  let discovered: Array<{ id: string; contextWindow?: number; maxTokens?: number }> = []
+  let discoveryError: string | undefined
+  if (typeof llm.discoverModels === 'function' && baseURL !== undefined) {
+    try {
+      discovered = await llm.discoverModels('llm-pi-ai', { provider, baseURL })
+    } catch (error) {
+      discoveryError = error instanceof Error ? error.message : String(error)
+    }
+  }
+  const thisModel = discovered.find((entry) => entry.id === model)
 
   // Try to mint a durable image attachment for the probe; fall back to
   // text-only if the attachment store is absent.
@@ -237,6 +259,10 @@ async function runProbe(
       totalMs: Date.now() - startedAt,
       finishReason: finishReason || 'stop',
       imageProbe,
+      contextWindow: thisModel?.contextWindow,
+      maxTokens: thisModel?.maxTokens,
+      discovery: discoveryError === undefined ? undefined : { error: discoveryError },
+      models: discoveryError === undefined ? discovered : undefined,
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -247,6 +273,10 @@ async function runProbe(
       totalMs: Date.now() - startedAt,
       imageProbe,
       imageSupported: imageRejected ? false : undefined,
+      contextWindow: thisModel?.contextWindow,
+      maxTokens: thisModel?.maxTokens,
+      discovery: discoveryError === undefined ? undefined : { error: discoveryError },
+      models: discoveryError === undefined ? discovered : undefined,
       error: message,
     }
   }
@@ -354,12 +384,36 @@ export function apply(ctx: Context) {
         if (id === lastProbeId) return
         lastProbeId = id
         probing = true
+        const providers = (section?.providers ?? {}) as Record<string, { baseURL?: unknown; models?: Array<{ id?: unknown; contextWindow?: unknown; maxTokens?: unknown }> } | undefined>
+        const profile = providers[provider]
+        const baseURL = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
         try {
-          const result = await runProbe(ctx, provider, model)
+          const result = await runProbe(ctx, provider, baseURL, model)
+          // Capacity backfill: for every declared model that lacks
+          // contextWindow/maxTokens, write the discovered value. Only fills
+          // missing fields — hand-set values are never overwritten.
+          const discovered = Array.isArray(result.models) ? result.models as Array<{ id: string; contextWindow?: number; maxTokens?: number }> : []
+          const models = profile?.models
+          let backfilled = 0
+          if (discovered.length > 0 && Array.isArray(models)) {
+            let changed = false
+            const next = models.map((entry) => {
+              const disc = discovered.find((d) => d.id === entry.id)
+              if (disc === undefined) return entry
+              const copy = { ...entry }
+              if (entry.contextWindow === undefined && disc.contextWindow !== undefined) { copy.contextWindow = disc.contextWindow; changed = true }
+              if (entry.maxTokens === undefined && disc.maxTokens !== undefined) { copy.maxTokens = disc.maxTokens; changed = true }
+              return copy
+            })
+            if (changed) {
+              await settingsApi(ctx)!.mutate(NS, [{ op: 'set', path: ['providers', provider, 'models'], value: next }])
+              backfilled = next.reduce((n, e, i) => n + (e.contextWindow !== models[i]?.contextWindow || e.maxTokens !== models[i]?.maxTokens ? 1 : 0), 0)
+            }
+          }
           const settings = settingsApi(ctx)
           if (settings === undefined) return
           await settings.mutate(NS, [
-            { op: 'set', path: [PROBE_RESULT_FLAG], value: { ...result, id, provider, model } },
+            { op: 'set', path: [PROBE_RESULT_FLAG], value: { ...result, id, provider, model, backfilled } },
             { op: 'unset', path: [PROBE_REQ_FLAG] },
           ])
         } catch {

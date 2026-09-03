@@ -176,6 +176,9 @@ interface HostProbeResult {
   finishReason?: string
   imageProbe?: boolean
   imageSupported?: boolean
+  contextWindow?: number
+  maxTokens?: number
+  backfilled?: number
   error?: string
 }
 
@@ -225,10 +228,13 @@ async function sendProbeRequest(
           }
         }
         const caps: string[] = []
+        if (result.contextWindow !== undefined) caps.push(`ctx: ${result.contextWindow}`)
+        if (result.maxTokens !== undefined) caps.push(`max: ${result.maxTokens}`)
         caps.push(`first-token: ${result.firstTokenMs ?? 'n/a'}ms`)
         if (result.totalMs !== undefined) caps.push(`total: ${result.totalMs}ms`)
         caps.push(`reason: ${result.finishReason ?? 'stop'}`)
         if (result.imageProbe) caps.push('image: accepted')
+        if (result.backfilled !== undefined && result.backfilled > 0) caps.push(`backfilled: ${result.backfilled}`)
         return {
           status: 'success', provider, model, totalMs: result.totalMs,
           firstTokenMs: result.firstTokenMs,
