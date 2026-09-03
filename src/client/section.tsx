@@ -181,7 +181,9 @@ async function probeModel(
       const totalMs = Math.round(performance.now() - startedAt)
       return { status: 'failure', provider, model, totalMs, failure: { code: 'NO_DISCOVER', message: `No discovery method. Fns: [${fnKeys.join(', ')}]` } }
     }
-    const models = await discoverFn('llm-pi-ai', { provider })
+    // discoverModels returns a typert remote response: { ok, value, error }
+    const raw = await discoverFn('llm-pi-ai', { provider }) as { ok?: boolean; value?: Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>; error?: { message: string } } | Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>
+    const models = Array.isArray(raw) ? raw : (raw?.ok !== false ? (raw as { value?: unknown })?.value ?? [] : [])
     const found = models.find(m => m.id === model)
     const totalMs = Math.round(performance.now() - startedAt)
     if (!found) {
