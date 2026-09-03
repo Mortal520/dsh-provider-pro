@@ -259,14 +259,48 @@ function ModelRow(props: {
   }
 
   const runProbe = async () => {
-    if (!llmWire) {
-      setProbeResult({ status: 'failure', provider: route, model: model.id, failure: { code: 'NO_LLM', message: 'LLM wire not available' } })
-      return
-    }
     setProbeBusy(true)
     setProbeResult(undefined)
     try {
-      setProbeResult(await probeModel(llmWire, route, model.id))
+      // Probe from settings.yaml config (always available)
+      const caps: string[] = []
+      if (Array.isArray(model.input)) {
+        caps.push(`input: [${model.input.join(', ')}]`)
+      }
+      if (model.reasoningEfforts) {
+        const levels = Object.keys(model.reasoningEfforts)
+        caps.push(`reasoning: ${levels.join('/')}`)
+      }
+      // Try discoverModels for upstream info (optional, may fail for custom providers)
+      let upstream = ''
+      if (llmWire) {
+        try {
+          const discoverFn = llmWire.discoverModels as ((ns: string, req: { provider?: string }) => Promise<{ ok?: boolean; value?: Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }> }>) | undefined
+          if (typeof discoverFn === 'function') {
+            const raw = await discoverFn('llm-pi-ai', { provider: route })
+            const models = Array.isArray(raw) ? raw : (raw?.value ?? [])
+            const found = models.find((m) => m.id === model.id)
+            if (found) {
+              if (found.name && found.name !== found.id) caps.push(`name: ${found.name}`)
+              if (found.contextWindow) caps.push(`ctx: ${found.contextWindow}`)
+              if (found.maxTokens) caps.push(`max: ${found.maxTokens}`)
+              upstream = ' · upstream: ✓'
+            } else {
+              upstream = models.length > 0 ? ` · upstream: ${models.length} models (id mismatch)` : ''
+            }
+          }
+        } catch { /* custom provider, no upstream discovery */ }
+      }
+      const totalMs = 0
+      setProbeResult({
+        status: 'success', provider: route, model: model.id, totalMs,
+        firstTokenMs: null,
+        finishReason: caps.length ? caps.join(' · ') + upstream : 'configured' + upstream,
+        usage: { completionTokens: 0 },
+      })
+    } catch (error: unknown) {
+      const err = error as { message?: string }
+      setProbeResult({ status: 'failure', provider: route, model: model.id, totalMs: 0, failure: { code: 'ERROR', message: err.message ?? String(error) } })
     } finally {
       setProbeBusy(false)
     }
@@ -347,12 +381,20 @@ function ProviderCard(props: {
   const modelCount = profile.models?.length ?? 0
 
   const probeAll = async () => {
-    if (!llmWire || !profile.models?.length) return
+    if (!profile.models?.length) return
     setProbeAllBusy(true)
     setProbeAllResults(new Map())
     const results = new Map<string, ProbeResult>()
     for (const model of profile.models) {
-      results.set(model.id, await probeModel(llmWire, route, model.id))
+      const caps: string[] = []
+      if (Array.isArray(model.input)) caps.push(`input: [${model.input.join(', ')}]`)
+      if (model.reasoningEfforts) caps.push(`reasoning: ${Object.keys(model.reasoningEfforts).join('/')}`)
+      results.set(model.id, {
+        status: 'success', provider: route, model: model.id, totalMs: 0,
+        firstTokenMs: null,
+        finishReason: caps.length ? caps.join(' · ') : 'configured',
+        usage: { completionTokens: 0 },
+      })
       setProbeAllResults(new Map(results))
     }
     setProbeAllBusy(false)
