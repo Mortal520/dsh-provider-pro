@@ -182,9 +182,11 @@ async function probeModel(
       return { status: 'failure', provider, model, totalMs, failure: { code: 'NO_DISCOVER', message: `No discovery method. Fns: [${fnKeys.join(', ')}]` } }
     }
     // discoverModels returns a typert remote response: { ok, value, error }
-    const raw = await discoverFn('llm-pi-ai', { provider }) as { ok?: boolean; value?: Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>; error?: { message: string } } | Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>
-    const models = Array.isArray(raw) ? raw : (raw?.ok !== false ? (raw as { value?: unknown })?.value ?? [] : [])
-    const found = models.find(m => m.id === model)
+    type DiscResult = { id: string; name?: string; contextWindow?: number; maxTokens?: number }
+    type DiscResponse = { ok?: boolean; value?: DiscResult[]; error?: { message: string } }
+    const raw: DiscResponse | DiscResult[] = await discoverFn('llm-pi-ai', { provider }) as DiscResponse | DiscResult[]
+    const models: DiscResult[] = Array.isArray(raw) ? raw : ((raw as DiscResponse).value ?? [])
+    const found = models.find((m: DiscResult) => m.id === model)
     const totalMs = Math.round(performance.now() - startedAt)
     if (!found) {
       return { status: 'failure', provider, model, totalMs, failure: { code: 'NOT_FOUND', message: `Model "${model}" not discoverable via provider "${provider}"` } }
