@@ -173,15 +173,15 @@ async function probeModel(
 ): Promise<ProbeResult> {
   const startedAt = performance.now()
   try {
-    // Discover listModels — may be named differently or unavailable
-    const keys = Object.keys(llmWire)
-    const fnKeys = keys.filter(k => typeof llmWire[k] === 'function')
-    const listModelsFn = llmWire.listModels as ((provider: string) => Promise<Array<{ id: string; inputModalities?: string[]; reasoning?: boolean; thinking?: boolean; maxTokens?: number }>>) | undefined
-    if (typeof listModelsFn !== 'function') {
+    // DSH remote.llm exposes discoverModels (not listModels)
+    const discoverModelsFn = (llmWire.discoverModels ?? llmWire.listModels) as ((provider: string) => Promise<Array<{ id: string; inputModalities?: string[]; reasoning?: boolean; thinking?: boolean; maxTokens?: number }>>) | undefined
+    if (typeof discoverModelsFn !== 'function') {
+      const keys = Object.keys(llmWire)
+      const fnKeys = keys.filter(k => typeof llmWire[k] === 'function')
       const totalMs = Math.round(performance.now() - startedAt)
-      return { status: 'failure', provider, model, totalMs, failure: { code: 'NO_LIST_MODELS', message: `llm.listModels not a function. Keys: [${keys.join(', ')}] | Fns: [${fnKeys.join(', ')}]` } }
+      return { status: 'failure', provider, model, totalMs, failure: { code: 'NO_DISCOVER', message: `No model discovery method. Keys: [${keys.join(', ')}] | Fns: [${fnKeys.join(', ')}]` } }
     }
-    const models = await listModelsFn(provider)
+    const models = await discoverModelsFn(provider)
     const found = models.find(m => m.id === model)
     const totalMs = Math.round(performance.now() - startedAt)
     if (!found) {
