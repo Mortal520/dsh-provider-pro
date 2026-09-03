@@ -96,6 +96,11 @@ const css = `
 .dpp-models { display: flex; flex-direction: column; gap: 0; border-top: 1px solid var(--dsw-alias-border-l2); padding-top: 10px; }
 .dpp-models-scroll { max-height: 280px; overflow-y: auto; }
 .dpp-models-title { font-size: 13px; font-weight: 500; color: var(--dsw-alias-label-secondary); margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+.dpp-toggle-btn {
+  background: none; border: none; cursor: pointer; font-size: 10px;
+  color: var(--dsw-alias-label-secondary); padding: 2px 4px; line-height: 1;
+  transition: transform 0.15s;
+}
 .dpp-model-row {
   display: flex; align-items: center; gap: 10px; padding: 6px 0;
   border-bottom: 1px solid var(--dsw-alias-border-l2); font-size: 13px;
@@ -168,13 +173,13 @@ async function probeModel(
 ): Promise<ProbeResult> {
   const startedAt = performance.now()
   try {
-    // Try listModels first — may not exist on all DSH versions
+    // Discover listModels — may be named differently or unavailable
+    const keys = Object.keys(llmWire)
+    const fnKeys = keys.filter(k => typeof llmWire[k] === 'function')
     const listModelsFn = llmWire.listModels as ((provider: string) => Promise<Array<{ id: string; inputModalities?: string[]; reasoning?: boolean; thinking?: boolean; maxTokens?: number }>>) | undefined
     if (typeof listModelsFn !== 'function') {
-      // Discover available methods for debugging
-      const methods = Object.keys(llmWire).filter(k => typeof llmWire[k] === 'function')
       const totalMs = Math.round(performance.now() - startedAt)
-      return { status: 'failure', provider, model, totalMs, failure: { code: 'NO_LIST_MODELS', message: `llm.listModels not a function. Available: [${methods.join(', ')}]` } }
+      return { status: 'failure', provider, model, totalMs, failure: { code: 'NO_LIST_MODELS', message: `llm.listModels not a function. Keys: [${keys.join(', ')}] | Fns: [${fnKeys.join(', ')}]` } }
     }
     const models = await listModelsFn(provider)
     const found = models.find(m => m.id === model)
@@ -307,6 +312,7 @@ function ProviderCard(props: {
   const [saved, setSaved] = useState(false)
   const [probeAllResults, setProbeAllResults] = useState<Map<string, ProbeResult>>(new Map())
   const [probeAllBusy, setProbeAllBusy] = useState(false)
+  const [modelsExpanded, setModelsExpanded] = useState(false)
 
   const save = async () => {
     setBusy(true)
@@ -406,27 +412,34 @@ function ProviderCard(props: {
       {Array.isArray(profile.models) && profile.models.length > 0 ? (
         <div className="dpp-models">
           <div className="dpp-models-title">
-            <span>{t('models')}（{modelCount}）</span>
-            <button type="button" className="dpp-probe-btn" disabled={probeAllBusy} onClick={() => void probeAll()}>
-              {probeAllBusy ? t('probing') : t('probeAll')}
+            <button type="button" className="dpp-toggle-btn" onClick={() => setModelsExpanded(v => !v)}>
+              {modelsExpanded ? '▼' : '▶'}
             </button>
+            <span>{t('models')}（{modelCount}）</span>
+            {modelsExpanded ? (
+              <button type="button" className="dpp-probe-btn" disabled={probeAllBusy} onClick={() => void probeAll()}>
+                {probeAllBusy ? t('probing') : t('probeAll')}
+              </button>
+            ) : null}
           </div>
-          <div className="dpp-models-scroll">
-            {profile.models.map((model, idx) => (
-              <ModelRow
-                key={model.id}
-                route={route}
-                profile={profile}
-                modelIndex={idx}
-                revision={revision}
-                api={api}
-                llmWire={llmWire}
-                t={t}
-                probeResult={probeAllBusy || probeAllResults.size > 0 ? probeAllResults.get(model.id) : undefined}
-                onMutated={onSaved}
-              />
-            ))}
-          </div>
+          {modelsExpanded ? (
+            <div className="dpp-models-scroll">
+              {profile.models.map((model, idx) => (
+                <ModelRow
+                  key={model.id}
+                  route={route}
+                  profile={profile}
+                  modelIndex={idx}
+                  revision={revision}
+                  api={api}
+                  llmWire={llmWire}
+                  t={t}
+                  probeResult={probeAllBusy || probeAllResults.size > 0 ? probeAllResults.get(model.id) : undefined}
+                  onMutated={onSaved}
+                />
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>

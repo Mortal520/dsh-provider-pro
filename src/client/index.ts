@@ -6,7 +6,7 @@
  * The section edits the `llm-pi-ai` user layer directly and holds three
  * capabilities: the reasoning-level master switch, per-provider User-Agent
  * override, per-model image-input declaration, and built-in probe via
- * the DSH LLM runtime (`remote.llm.stream()`).
+ * the DSH LLM catalog (`remote.llm`).
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { SectionEvents, SectionProps } from './section'
@@ -20,10 +20,13 @@ const NS_LOCALE = 'dsh-provider-pro'
 /**
  * Required services (cordis fiber inject). `remote.settings` for reading
  * and writing llm-pi-ai settings; `remote.llm` for built-in probe
- * (streaming a minimal request through DSH's LLM runtime, which handles
- * auth, routing, and attribution).
+ * (querying model capabilities through DSH's LLM catalog).
+ *
+ * `remote.llm` is a typert remote catalog proxy exposing listProviders()
+ * and listModels(provider). The client-side proxy does NOT expose stream()
+ * or chat() — those run host-side only.
  */
-export const inject = ['slots', 'locale', 'remote', 'remote.settings']
+export const inject = ['slots', 'locale', 'remote', 'remote.settings', 'remote.llm']
 
 /**
  * Cordis service surfaces this bundle consumes. Local structural types keep
@@ -43,6 +46,8 @@ interface ClientServices {
   remote: {
     $on(event: string, handler: (ns?: unknown) => void): () => void
     settings?: SettingsWireFace
+    /** LLM catalog proxy — injected via fiber. Methods depend on DSH version. */
+    llm?: Record<string, unknown>
   }
 }
 
@@ -84,18 +89,9 @@ export function apply(ctx: Context) {
     }
   })
 
-  /** Runtime probe of remote.llm — discover available methods once. */
-  let llmWire: Record<string, unknown> | undefined
-  try {
-    const candidate = (c.remote as unknown as Record<string, unknown>)?.llm
-    if (candidate !== undefined && candidate !== null && typeof candidate === 'object') {
-      llmWire = candidate as Record<string, unknown>
-    }
-  } catch { /* not available */ }
-
   const injected = (): SectionProps => ({
     api: c.remote.settings,
-    llmWire,
+    llmWire: c.remote.llm,
     t,
     events,
   })
