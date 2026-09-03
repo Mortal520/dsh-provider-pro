@@ -31,7 +31,13 @@
  * the 0.1.0–0.2.0 seven-level fill migrate down to the current set.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { FILL_REASONING_EFFORTS, LEGACY_REASONING_EFFORTS, matchesEfforts } from './shared.ts'
+import {
+  FILL_REASONING_EFFORTS,
+  LEGACY_REASONING_EFFORTS,
+  matchesEfforts,
+  PROBE_REQ_FLAG,
+  PROBE_RESULT_FLAG,
+} from './shared.ts'
 
 /** The pi-ai adapter's settings namespace, whose providers we extend. */
 const NS = 'llm-pi-ai'
@@ -151,6 +157,101 @@ type RouteProfile = { models?: unknown; [key: string]: unknown }
 /** Top-level flag in the `llm-pi-ai` user layer controlling the auto-fill. */
 const AUTO_REASONING_FLAG = 'dshProviderProAutoReasoning'
 
+/* ------------------------------------------------------------ probe IPC */
+
+/** A 1×1 transparent PNG used to test image admission on the real wire. */
+const PROBE_IMAGE_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+
+/** Serialize the llm-chunk stream types the probe observes. */
+interface ProbeChunk {
+  type?: string
+  text?: string
+  usage?: { completionTokens?: number }
+}
+
+/**
+ * Run one real probe through DSH's LLM runtime: a minimal request carrying a
+ * 1×1 PNG (image admission exercised on the actual wire) plus a text request
+ * fallback when no attachment store is mounted. Measures first-token latency,
+ * total time, and whether the upstream rejected the image.
+ */
+async function runProbe(
+  ctx: Context,
+  provider: string,
+  model: string,
+): Promise<Record<string, unknown>> {
+  const startedAt = Date.now()
+  const llm = (ctx as unknown as { get(key: string): unknown }).get('llm') as
+    | { stream(options: unknown): AsyncIterable<ProbeChunk> }
+    | undefined
+  if (llm === undefined || typeof llm.stream !== 'function') {
+    return { ok: false, error: 'LLM runtime not available' }
+  }
+
+  // Try to mint a durable image attachment for the probe; fall back to
+  // text-only if the attachment store is absent.
+  let attachment: unknown
+  let imageProbe = false
+  try {
+    const attachments = (ctx as unknown as { get(key: string): unknown }).get('attachments') as
+      | { saveImages(inputs: Array<{ data: Uint8Array; mediaType: string }>): Promise<unknown[]> }
+      | undefined
+    if (attachments !== undefined && typeof attachments.saveImages === 'function') {
+      const bytes = new Uint8Array(Buffer.from(PROBE_IMAGE_BASE64, 'base64'))
+      const refs = await attachments.saveImages([{ data: bytes, mediaType: 'image/png' }])
+      attachment = refs[0]
+      imageProbe = true
+    }
+  } catch {
+    // attachment store failure — text-only probe
+  }
+
+  const content = attachment !== undefined
+    ? [
+        { type: 'text', text: 'Reply with OK.' },
+        { type: 'image', attachment },
+      ]
+    : [{ type: 'text', text: 'Reply with OK.' }]
+
+  let firstTokenMs: number | null = null
+  let finishReason = ''
+  try {
+    const stream = llm.stream({
+      provider,
+      model,
+      messages: [{ role: 'user', content }],
+      maxTokens: 8,
+    }) as AsyncIterable<ProbeChunk>
+    for await (const chunk of stream) {
+      if (firstTokenMs === null && (chunk.type === 'text' || chunk.type === 'delta')) {
+        firstTokenMs = Date.now() - startedAt
+      }
+      if (chunk.type === 'finish') {
+        finishReason = (chunk as { reason?: string }).reason ?? 'stop'
+      }
+    }
+    return {
+      ok: true,
+      firstTokenMs,
+      totalMs: Date.now() - startedAt,
+      finishReason: finishReason || 'stop',
+      imageProbe,
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const lower = message.toLowerCase()
+    const imageRejected = /image|media|vision|multimodal|unsupported.*(?:content|type|image)/i.test(lower)
+    return {
+      ok: false,
+      totalMs: Date.now() - startedAt,
+      imageProbe,
+      imageSupported: imageRejected ? false : undefined,
+      error: message,
+    }
+  }
+}
+
 /**
  * One auto-fill pass: give every hand-declared model without a
  * `reasoningEfforts` the five-level dictionary (off/low/medium/high/max),
@@ -225,6 +326,10 @@ export function apply(ctx: Context) {
     () => {
       let cancelled = false
       let filling = false
+      let probing = false
+      /** Last request id consumed, so a repeated settings/updated for the same
+       * request does not re-run the probe (client re-uses one request slot). */
+      let lastProbeId = ''
       const events = ctx as unknown as EventsLike
       const sync = () => {
         state.resolver = buildResolver(() => readSection(ctx))
@@ -238,11 +343,37 @@ export function apply(ctx: Context) {
           filling = false
         }
       }
+      /** Consume the probe request slot (if any) and write the result back. */
+      const probe = async () => {
+        if (probing || cancelled) return
+        const section = readSection(ctx) as Record<string, unknown> | undefined
+        const req = section?.[PROBE_REQ_FLAG]
+        if (req === undefined || req === null || typeof req !== 'object') return
+        const { id, provider, model } = req as { id?: unknown; provider?: unknown; model?: unknown }
+        if (typeof id !== 'string' || typeof provider !== 'string' || typeof model !== 'string') return
+        if (id === lastProbeId) return
+        lastProbeId = id
+        probing = true
+        try {
+          const result = await runProbe(ctx, provider, model)
+          const settings = settingsApi(ctx)
+          if (settings === undefined) return
+          await settings.mutate(NS, [
+            { op: 'set', path: [PROBE_RESULT_FLAG], value: { ...result, id, provider, model } },
+            { op: 'unset', path: [PROBE_REQ_FLAG] },
+          ])
+        } catch {
+          // Result slot left unset; the client times out and reports.
+        } finally {
+          probing = false
+        }
+      }
       const handler = (payload?: unknown) => {
         // `settings/updated` also fires for other namespaces; only ours matters.
         if (typeof payload === 'string' && payload !== NS) return
         sync()
         void fill()
+        void probe()
       }
       const disposer = events.on('settings/updated', handler) as unknown as () => void
       // The namespace may not be registered yet at activation; poll briefly
@@ -252,6 +383,7 @@ export function apply(ctx: Context) {
           if (readSection(ctx) !== undefined) {
             sync()
             void fill()
+            void probe()
             return
           }
           await new Promise((resolve) => setTimeout(resolve, 200))

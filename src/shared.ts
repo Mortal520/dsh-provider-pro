@@ -68,3 +68,11 @@ export function matchesEfforts(value: unknown, dict: Record<string, string | nul
 
 /** The value written to a model's `input` field when the user enables image support. */
 export const INPUT_WITH_IMAGE = ['text', 'image'] as const
+
+/* --------------------------------------------------------------- probe IPC */
+
+/** Client → host probe request slot (llm-pi-ai user layer). */
+export const PROBE_REQ_FLAG = 'dshProviderProProbe'
+
+/** Host → client probe result slot (llm-pi-ai user layer). */
+export const PROBE_RESULT_FLAG = 'dshProviderProProbeResult'

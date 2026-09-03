@@ -29,3 +29,7 @@ export declare const LEGACY_REASONING_EFFORTS: Record<ThinkingLevel, string | nu
 export declare function matchesEfforts(value: unknown, dict: Record<string, string | null>): boolean;
 /** The value written to a model's `input` field when the user enables image support. */
 export declare const INPUT_WITH_IMAGE: readonly ['text', 'image'];
+/** Client → host probe request slot (llm-pi-ai user layer). */
+export declare const PROBE_REQ_FLAG = "dshProviderProProbe";
+/** Host → client probe result slot (llm-pi-ai user layer). */
+export declare const PROBE_RESULT_FLAG = "dshProviderProProbeResult";

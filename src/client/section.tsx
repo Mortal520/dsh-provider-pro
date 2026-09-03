@@ -23,7 +23,7 @@ import type {
   SettingsWireFace,
 } from './types'
 import { NS } from './types'
-import { FILL_REASONING_EFFORTS, LEGACY_REASONING_EFFORTS, INPUT_WITH_IMAGE, matchesEfforts } from '../shared.ts'
+import { FILL_REASONING_EFFORTS, LEGACY_REASONING_EFFORTS, INPUT_WITH_IMAGE, matchesEfforts, PROBE_REQ_FLAG, PROBE_RESULT_FLAG } from '../shared.ts'
 
 /** Cross-render event hook the section subscribes to (wired in client/index.ts). */
 export interface SectionEvents {
@@ -165,55 +165,83 @@ function withoutAutoFilled(models: ProviderModel[] | undefined): ProviderModel[]
 
 /* -------------------------------------------------------- probe via LLM catalog */
 
-/** Query DSH's LLM catalog for model capabilities (no actual inference). */
-async function probeModel(
-  llmWire: Record<string, unknown>,
+/** Result written by the host half after running a real probe. */
+interface HostProbeResult {
+  id: string
+  provider: string
+  model: string
+  ok: boolean
+  firstTokenMs?: number | null
+  totalMs?: number
+  finishReason?: string
+  imageProbe?: boolean
+  imageSupported?: boolean
+  error?: string
+}
+
+/**
+ * Ask the host half to run a real probe through DSH's LLM runtime. The host
+ * (a) mints a 1×1 PNG attachment, (b) streams a minimal request carrying it,
+ * and (c) writes the result back to the `dshProviderProProbeResult` settings
+ * slot. The client (this function) writes the request, then polls the result
+ * slot until the request id is answered or the timeout elapses.
+ *
+ * IPC path: both halves exchange through the llm-pi-ai user layer — the host
+ * listens to `settings/updated`, consumes `PROBE_REQ_FLAG`, and publishes
+ * `PROBE_RESULT_FLAG`.
+ */
+async function sendProbeRequest(
+  api: SettingsWireFace,
   provider: string,
   model: string,
 ): Promise<ProbeResult> {
-  const startedAt = performance.now()
-  try {
-    // discoverModels(settingsNs, { provider }) — DSH typert remote API
-    const discoverFn = llmWire.discoverModels as ((settingsNs: string, req: { provider?: string }) => Promise<Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>>) | undefined
-    if (typeof discoverFn !== 'function') {
-      const keys = Object.keys(llmWire)
-      const fnKeys = keys.filter(k => typeof llmWire[k] === 'function')
-      const totalMs = Math.round(performance.now() - startedAt)
-      return { status: 'failure', provider, model, totalMs, failure: { code: 'NO_DISCOVER', message: `No discovery method. Fns: [${fnKeys.join(', ')}]` } }
-    }
-    // discoverModels returns a typert remote response: { ok, value, error }
-    type DiscResult = { id: string; name?: string; contextWindow?: number; maxTokens?: number }
-    type DiscResponse = { ok?: boolean; value?: DiscResult[]; error?: { message: string } }
-    const raw: DiscResponse | DiscResult[] = await discoverFn('llm-pi-ai', { provider }) as DiscResponse | DiscResult[]
-    const models: DiscResult[] = Array.isArray(raw) ? raw : ((raw as DiscResponse).value ?? [])
-    const found = models.find((m: DiscResult) => m.id === model)
-    const totalMs = Math.round(performance.now() - startedAt)
-    if (!found) {
-      const discovered = models.map((m: DiscResult) => m.id).join(', ')
-      return { status: 'failure', provider, model, totalMs, failure: { code: 'NOT_FOUND', message: `Model "${model}" not in discovered list (${models.length} found: ${discovered || '(empty)'})` } }
-    }
-    const caps: string[] = []
-    if (found.name && found.name !== found.id) caps.push(`name: ${found.name}`)
-    if (found.contextWindow) caps.push(`ctx: ${found.contextWindow}`)
-    if (found.maxTokens) caps.push(`max: ${found.maxTokens}`)
-    return {
-      status: 'success', provider, model, totalMs,
-      firstTokenMs: null,
-      finishReason: caps.length ? caps.join(' · ') : 'discoverable',
-      usage: { completionTokens: 0 },
-    }
-  } catch (error: unknown) {
-    const totalMs = Math.round(performance.now() - startedAt)
-    const err = error as { code?: string; message?: string; status?: number }
-    return {
-      status: 'failure', provider, model, totalMs,
-      failure: {
-        code: err.code ?? (error instanceof Error ? error.name.toUpperCase() : 'UNKNOWN'),
-        message: err.message ?? String(error),
-        status: err.status,
-      },
+  const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  // Clear any stale result for this probe; write the request. The host reacts
+  // on the resulting settings/updated, runs the probe, then publishes.
+  const write = await api.mutate(NS, [
+    { op: 'set', path: [PROBE_REQ_FLAG], value: { id, provider, model } },
+  ])
+  if (!write.ok) {
+    return { status: 'failure', provider, model, failure: { code: 'WRITE_FAIL', message: write.error?.message ?? 'probe request write failed' } }
+  }
+  // Poll for the answer, capped at ~12s (probe should be a tiny request).
+  const deadline = Date.now() + 12000
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const view = await api.describe().then((r) => (r.ok ? r.value : undefined)).catch(() => undefined)
+    const ns = view?.namespaces.find((entry) => entry.ns === NS)
+    const user = (ns?.user ?? ns?.value ?? {}) as Record<string, unknown>
+    const slot = user[PROBE_RESULT_FLAG]
+    if (slot !== undefined && typeof slot === 'object') {
+      const result = slot as HostProbeResult
+      if (result.id === id) {
+        if (!result.ok) {
+          return {
+            status: 'failure', provider, model, totalMs: result.totalMs,
+            failure: {
+              code: result.imageSupported === false ? 'IMAGE_UNSUPPORTED' : 'PROBE_FAIL',
+              message: result.error ?? (result.imageSupported === false ? 'model does not accept image input' : 'probe failed'),
+            },
+          }
+        }
+        const caps: string[] = []
+        caps.push(`first-token: ${result.firstTokenMs ?? 'n/a'}ms`)
+        if (result.totalMs !== undefined) caps.push(`total: ${result.totalMs}ms`)
+        caps.push(`reason: ${result.finishReason ?? 'stop'}`)
+        if (result.imageProbe) caps.push('image: accepted')
+        return {
+          status: 'success', provider, model, totalMs: result.totalMs,
+          firstTokenMs: result.firstTokenMs,
+          finishReason: caps.join(' · '),
+          usage: {},
+        }
+      }
     }
   }
+  // Timeout: likely the host probe never ran (LLM runtime absent) or the
+  // request is stuck. Clean the request slot so a retry re-fires.
+  void api.mutate(NS, [{ op: 'unset', path: [PROBE_REQ_FLAG] }]).catch(() => undefined)
+  return { status: 'failure', provider, model, failure: { code: 'TIMEOUT', message: 'probe timed out (host probe did not respond)' } }
 }
 
 /* -------------------------------------------------------- model row (image input + probe) */
@@ -262,42 +290,7 @@ function ModelRow(props: {
     setProbeBusy(true)
     setProbeResult(undefined)
     try {
-      // Probe from settings.yaml config (always available)
-      const caps: string[] = []
-      if (Array.isArray(model.input)) {
-        caps.push(`input: [${model.input.join(', ')}]`)
-      }
-      if (model.reasoningEfforts) {
-        const levels = Object.keys(model.reasoningEfforts)
-        caps.push(`reasoning: ${levels.join('/')}`)
-      }
-      // Try discoverModels for upstream info (optional, may fail for custom providers)
-      let upstream = ''
-      if (llmWire) {
-        try {
-          const discoverFn = llmWire.discoverModels as ((ns: string, req: { provider?: string }) => Promise<{ ok?: boolean; value?: Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }> }>) | undefined
-          if (typeof discoverFn === 'function') {
-            const raw = await discoverFn('llm-pi-ai', { provider: route })
-            const models = Array.isArray(raw) ? raw : (raw?.value ?? [])
-            const found = models.find((m) => m.id === model.id)
-            if (found) {
-              if (found.name && found.name !== found.id) caps.push(`name: ${found.name}`)
-              if (found.contextWindow) caps.push(`ctx: ${found.contextWindow}`)
-              if (found.maxTokens) caps.push(`max: ${found.maxTokens}`)
-              upstream = ' · upstream: ✓'
-            } else {
-              upstream = models.length > 0 ? ` · upstream: ${models.length} models (id mismatch)` : ''
-            }
-          }
-        } catch { /* custom provider, no upstream discovery */ }
-      }
-      const totalMs = 0
-      setProbeResult({
-        status: 'success', provider: route, model: model.id, totalMs,
-        firstTokenMs: null,
-        finishReason: caps.length ? caps.join(' · ') + upstream : 'configured' + upstream,
-        usage: { completionTokens: 0 },
-      })
+      setProbeResult(await sendProbeRequest(api, route, model.id))
     } catch (error: unknown) {
       const err = error as { message?: string }
       setProbeResult({ status: 'failure', provider: route, model: model.id, totalMs: 0, failure: { code: 'ERROR', message: err.message ?? String(error) } })
@@ -386,15 +379,7 @@ function ProviderCard(props: {
     setProbeAllResults(new Map())
     const results = new Map<string, ProbeResult>()
     for (const model of profile.models) {
-      const caps: string[] = []
-      if (Array.isArray(model.input)) caps.push(`input: [${model.input.join(', ')}]`)
-      if (model.reasoningEfforts) caps.push(`reasoning: ${Object.keys(model.reasoningEfforts).join('/')}`)
-      results.set(model.id, {
-        status: 'success', provider: route, model: model.id, totalMs: 0,
-        firstTokenMs: null,
-        finishReason: caps.length ? caps.join(' · ') : 'configured',
-        usage: { completionTokens: 0 },
-      })
+      results.set(model.id, await sendProbeRequest(api, route, model.id))
       setProbeAllResults(new Map(results))
     }
     setProbeAllBusy(false)
