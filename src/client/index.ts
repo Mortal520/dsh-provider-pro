@@ -23,7 +23,7 @@ const NS_LOCALE = 'dsh-provider-pro'
  * (streaming a minimal request through DSH's LLM runtime, which handles
  * auth, routing, and attribution).
  */
-export const inject = ['slots', 'locale', 'remote', 'remote.settings', 'remote.llm']
+export const inject = ['slots', 'locale', 'remote', 'remote.settings']
 
 /**
  * Cordis service surfaces this bundle consumes. Local structural types keep
@@ -43,10 +43,6 @@ interface ClientServices {
   remote: {
     $on(event: string, handler: (ns?: unknown) => void): () => void
     settings?: SettingsWireFace
-    llm?: {
-      listProviders(): Promise<Array<{ id: string }>>
-      listModels(provider: string): Promise<Array<{ id: string; inputModalities?: string[]; reasoning?: boolean; thinking?: boolean; maxTokens?: number }>>
-    }
   }
 }
 
@@ -88,9 +84,18 @@ export function apply(ctx: Context) {
     }
   })
 
+  /** Runtime probe of remote.llm — discover available methods once. */
+  let llmWire: Record<string, unknown> | undefined
+  try {
+    const candidate = (c.remote as unknown as Record<string, unknown>)?.llm
+    if (candidate !== undefined && candidate !== null && typeof candidate === 'object') {
+      llmWire = candidate as Record<string, unknown>
+    }
+  } catch { /* not available */ }
+
   const injected = (): SectionProps => ({
     api: c.remote.settings,
-    llm: c.remote.llm,
+    llmWire,
     t,
     events,
   })

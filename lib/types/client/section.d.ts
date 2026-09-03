@@ -7,19 +7,8 @@ export interface SectionEvents {
 export interface SectionProps {
     /** The `ctx.remote.settings` wire face (DSH 2.0.x); undefined when absent. */
     api: SettingsWireFace | undefined;
-    /** The `ctx.remote.llm` catalog face for querying model capabilities. */
-    llm?: {
-        listProviders(): Promise<Array<{
-            id: string;
-        }>>;
-        listModels(provider: string): Promise<Array<{
-            id: string;
-            inputModalities?: string[];
-            reasoning?: boolean;
-            thinking?: boolean;
-            maxTokens?: number;
-        }>>;
-    };
+    /** Raw remote.llm wire — discovered at runtime; methods TBD. */
+    llmWire?: Record<string, unknown>;
     t: T;
     events: SectionEvents;
 }

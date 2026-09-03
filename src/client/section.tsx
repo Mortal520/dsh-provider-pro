@@ -33,11 +33,8 @@ export interface SectionEvents {
 export interface SectionProps {
   /** The `ctx.remote.settings` wire face (DSH 2.0.x); undefined when absent. */
   api: SettingsWireFace | undefined
-  /** The `ctx.remote.llm` catalog face for querying model capabilities. */
-  llm?: {
-    listProviders(): Promise<Array<{ id: string }>>
-    listModels(provider: string): Promise<Array<{ id: string; inputModalities?: string[]; reasoning?: boolean; thinking?: boolean; maxTokens?: number }>>
-  }
+  /** Raw remote.llm wire — discovered at runtime; methods TBD. */
+  llmWire?: Record<string, unknown>
   t: T
   events: SectionEvents
 }
@@ -165,19 +162,26 @@ function withoutAutoFilled(models: ProviderModel[] | undefined): ProviderModel[]
 
 /** Query DSH's LLM catalog for model capabilities (no actual inference). */
 async function probeModel(
-  llm: NonNullable<SectionProps['llm']>,
+  llmWire: Record<string, unknown>,
   provider: string,
   model: string,
 ): Promise<ProbeResult> {
   const startedAt = performance.now()
   try {
-    const models = await llm.listModels(provider)
+    // Try listModels first — may not exist on all DSH versions
+    const listModelsFn = llmWire.listModels as ((provider: string) => Promise<Array<{ id: string; inputModalities?: string[]; reasoning?: boolean; thinking?: boolean; maxTokens?: number }>>) | undefined
+    if (typeof listModelsFn !== 'function') {
+      // Discover available methods for debugging
+      const methods = Object.keys(llmWire).filter(k => typeof llmWire[k] === 'function')
+      const totalMs = Math.round(performance.now() - startedAt)
+      return { status: 'failure', provider, model, totalMs, failure: { code: 'NO_LIST_MODELS', message: `llm.listModels not a function. Available: [${methods.join(', ')}]` } }
+    }
+    const models = await listModelsFn(provider)
     const found = models.find(m => m.id === model)
     const totalMs = Math.round(performance.now() - startedAt)
     if (!found) {
-      return { status: 'failure', provider, model, totalMs, failure: { code: 'NOT_FOUND', message: `Model "${model}" not found in provider "${provider}" catalog` } }
+      return { status: 'failure', provider, model, totalMs, failure: { code: 'NOT_FOUND', message: `Model "${model}" not in provider "${provider}" catalog` } }
     }
-    // Build capability summary from catalog metadata
     const caps: string[] = []
     if (found.inputModalities?.includes('image')) caps.push('image')
     if (found.inputModalities?.includes('text')) caps.push('text')
@@ -211,12 +215,12 @@ function ModelRow(props: {
   modelIndex: number
   revision: number
   api: SettingsWireFace
-  llm?: SectionProps['llm']
+  llmWire?: Record<string, unknown>
   t: T
   probeResult?: ProbeResult
   onMutated: () => void
 }) {
-  const { route, profile, modelIndex, revision, api, llm, t, probeResult: probeAllResult, onMutated } = props
+  const { route, profile, modelIndex, revision, api, llmWire, t, probeResult: probeAllResult, onMutated } = props
   const model = profile.models?.[modelIndex]
   if (!model) return null
   const hasImage = Array.isArray(model.input) && model.input.includes('image')
@@ -246,14 +250,14 @@ function ModelRow(props: {
   }
 
   const runProbe = async () => {
-    if (!llm) {
-      setProbeResult({ status: 'failure', provider: route, model: model.id, failure: { code: 'NO_LLM', message: 'LLM runtime not available' } })
+    if (!llmWire) {
+      setProbeResult({ status: 'failure', provider: route, model: model.id, failure: { code: 'NO_LLM', message: 'LLM wire not available' } })
       return
     }
     setProbeBusy(true)
     setProbeResult(undefined)
     try {
-      setProbeResult(await probeModel(llm, route, model.id))
+      setProbeResult(await probeModel(llmWire, route, model.id))
     } finally {
       setProbeBusy(false)
     }
@@ -291,11 +295,11 @@ function ProviderCard(props: {
   profile: ProviderProfile
   revision: number
   api: SettingsWireFace
-  llm?: SectionProps['llm']
+  llmWire?: Record<string, unknown>
   t: T
   onSaved: () => void
 }) {
-  const { route, profile, revision, api, llm, t, onSaved } = props
+  const { route, profile, revision, api, llmWire, t, onSaved } = props
   const [ua, setUa] = useState(profile.userAgent ?? '')
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -333,12 +337,12 @@ function ProviderCard(props: {
   const modelCount = profile.models?.length ?? 0
 
   const probeAll = async () => {
-    if (!llm || !profile.models?.length) return
+    if (!llmWire || !profile.models?.length) return
     setProbeAllBusy(true)
     setProbeAllResults(new Map())
     const results = new Map<string, ProbeResult>()
     for (const model of profile.models) {
-      results.set(model.id, await probeModel(llm, route, model.id))
+      results.set(model.id, await probeModel(llmWire, route, model.id))
       setProbeAllResults(new Map(results))
     }
     setProbeAllBusy(false)
@@ -416,7 +420,7 @@ function ProviderCard(props: {
                 modelIndex={idx}
                 revision={revision}
                 api={api}
-                llm={llm}
+                llmWire={llmWire}
                 t={t}
                 probeResult={probeAllBusy || probeAllResults.size > 0 ? probeAllResults.get(model.id) : undefined}
                 onMutated={onSaved}
@@ -432,7 +436,7 @@ function ProviderCard(props: {
 /* ---------------------------------------------------------------- root UI */
 
 export function ProviderProSection(props: SectionProps) {
-  const { api, t, events, llm } = props
+  const { api, t, events, llmWire } = props
   ensureStyle()
 
   const [view, setView] = useState<SettingsNamespaceView>()
@@ -570,7 +574,7 @@ export function ProviderProSection(props: SectionProps) {
                 profile={providers[route] ?? {}}
                 revision={view.revision}
                 api={api}
-                llm={llm}
+                llmWire={llmWire}
                 t={t}
                 onSaved={reload}
               />
