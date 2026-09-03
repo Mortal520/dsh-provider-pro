@@ -173,32 +173,28 @@ async function probeModel(
 ): Promise<ProbeResult> {
   const startedAt = performance.now()
   try {
-    // DSH remote.llm exposes discoverModels(provider, model)
-    const discoverModelsFn = (llmWire.discoverModels ?? llmWire.listModels) as ((provider: string, model: string) => Promise<Array<{ id: string; inputModalities?: string[]; reasoning?: boolean; thinking?: boolean; maxTokens?: number }>>) | undefined
-    if (typeof discoverModelsFn !== 'function') {
+    // discoverModels(settingsNs, { provider }) — DSH typert remote API
+    const discoverFn = llmWire.discoverModels as ((settingsNs: string, req: { provider?: string }) => Promise<Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>>) | undefined
+    if (typeof discoverFn !== 'function') {
       const keys = Object.keys(llmWire)
       const fnKeys = keys.filter(k => typeof llmWire[k] === 'function')
       const totalMs = Math.round(performance.now() - startedAt)
-      return { status: 'failure', provider, model, totalMs, failure: { code: 'NO_DISCOVER', message: `No model discovery method. Keys: [${keys.join(', ')}] | Fns: [${fnKeys.join(', ')}]` } }
+      return { status: 'failure', provider, model, totalMs, failure: { code: 'NO_DISCOVER', message: `No discovery method. Fns: [${fnKeys.join(', ')}]` } }
     }
-    const result = await discoverModelsFn(provider, model)
+    const models = await discoverFn('llm-pi-ai', { provider })
+    const found = models.find(m => m.id === model)
     const totalMs = Math.round(performance.now() - startedAt)
-    // discoverModels may return a single model info or an array
-    const found = Array.isArray(result)
-      ? result.find(m => m.id === model) ?? result[0]
-      : result as { id: string; inputModalities?: string[]; reasoning?: boolean; thinking?: boolean; maxTokens?: number } | undefined
     if (!found) {
-      return { status: 'failure', provider, model, totalMs, failure: { code: 'NOT_FOUND', message: `Model "${model}" not in provider "${provider}" catalog` } }
+      return { status: 'failure', provider, model, totalMs, failure: { code: 'NOT_FOUND', message: `Model "${model}" not discoverable via provider "${provider}"` } }
     }
     const caps: string[] = []
-    if (found.inputModalities?.includes('image')) caps.push('image')
-    if (found.inputModalities?.includes('text')) caps.push('text')
-    if (found.reasoning) caps.push('reasoning')
-    if (found.maxTokens) caps.push(`maxTokens:${found.maxTokens}`)
+    if (found.name && found.name !== found.id) caps.push(`name: ${found.name}`)
+    if (found.contextWindow) caps.push(`ctx: ${found.contextWindow}`)
+    if (found.maxTokens) caps.push(`max: ${found.maxTokens}`)
     return {
       status: 'success', provider, model, totalMs,
       firstTokenMs: null,
-      finishReason: caps.length ? `capabilities: ${caps.join(', ')}` : 'catalog-ok',
+      finishReason: caps.length ? caps.join(' · ') : 'discoverable',
       usage: { completionTokens: 0 },
     }
   } catch (error: unknown) {
