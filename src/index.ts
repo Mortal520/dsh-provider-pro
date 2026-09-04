@@ -167,7 +167,29 @@ const PROBE_IMAGE_BASE64 =
 interface ProbeChunk {
   type?: string
   text?: string
+  index?: number
+  reason?: unknown
   usage?: { completionTokens?: number }
+}
+
+/** Read the human-readable finish reason from a `finish` chunk. */
+function reasonText(reason: unknown): string {
+  if (typeof reason === 'string') return reason
+  if (reason === null || typeof reason !== 'object') return 'stop'
+  const entry = reason as Record<string, unknown>
+  // DSH FinishReason: { kind: 'stop'|'tool-calls'|'max-tokens'|'aborted'|'error', failure? }
+  if (typeof entry.kind === 'string') {
+    if (entry.kind === 'error' || entry.kind === 'aborted') {
+      const failure = entry.failure
+      if (failure !== null && typeof failure === 'object') {
+        const message = (failure as Record<string, unknown>).message
+        if (typeof message === 'string') return `${entry.kind}: ${message}`
+      }
+    }
+    return entry.kind
+  }
+  if (typeof entry.code === 'string') return entry.code
+  return 'stop'
 }
 
 /**
@@ -246,11 +268,11 @@ async function runProbe(
       maxTokens: 8,
     }) as AsyncIterable<ProbeChunk>
     for await (const chunk of stream) {
-      if (firstTokenMs === null && (chunk.type === 'text' || chunk.type === 'delta')) {
+      if (firstTokenMs === null && chunk.type === 'text-delta') {
         firstTokenMs = Date.now() - startedAt
       }
       if (chunk.type === 'finish') {
-        finishReason = (chunk as { reason?: string }).reason ?? 'stop'
+        finishReason = reasonText((chunk as { reason?: unknown }).reason)
       }
     }
     return {

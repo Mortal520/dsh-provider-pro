@@ -355,7 +355,7 @@ function ModelRow(props: {
       {displayResult ? (
         <span className={'dpp-probe-result ' + (displayResult.status === 'success' ? 'dpp-probe-ok' : 'dpp-probe-fail')}>
           {displayResult.status === 'success'
-            ? `${displayResult.firstTokenMs ?? '—'}ms / ${displayResult.totalMs ?? '—'}ms / ${displayResult.finishReason ?? '—'}`
+            ? displayResult.finishReason ?? ''
             : `${displayResult.failure?.code ?? 'ERR'}: ${displayResult.failure?.message ?? ''}`}
         </span>
       ) : null}
