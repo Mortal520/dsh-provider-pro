@@ -32,10 +32,12 @@ out of the box, with no per-model configuration.
    自行决定）。切换发生在聊天里，无需设置。
 3. **图片输入声明** — 每个模型卡片内提供「支持图片输入」复选框，
    勾选即写入 `input: [text, image]`，DSH 随即允许向该模型附加图片。
-4. **供应商探测**（内置）— 每个模型旁出现「探测」按钮，另有供应商级
-   「一键探测」：host 半通过 DSH 的 LLM 运行时发送带 1×1 PNG 的极小请求，
-   检测端点可达性、首 token 延迟、上游是否接受图片；同时拉取
-   `/v1/models` 的 `contextWindow`/`maxTokens` 自动回填缺失字段（手工值不覆盖）。
+4. **供应商探测与测活**（内置）— 每个模型旁提供两个按钮：
+   - **能力获取**（0 消耗）：调 `/v1/models` 拉取 `contextWindow`/`maxTokens`，
+     自动回填缺失字段（手工值不覆盖），并更新测活状态；
+   - **深度探测**（兜底，有消耗）：host 半通过 DSH 的 LLM 运行时发送带 1×1 PNG
+     的极小请求，检测端点可达性、首 token 延迟、上游是否接受图片。
+   供应商卡片头显示 可达/不可达/未测 徽章，模型行显示对应状态点。
 
 ### 安装
 
@@ -126,12 +128,15 @@ pnpm run smoke    # Host 行为冒烟（fetch 补丁 / 补档器 / 总开关）
 3. **Image-input declaration** — each model card shows a "Support image input"
    checkbox; checking it writes `input: [text, image]` so DSH allows image
    attachments for that model.
-4. **Built-in provider probe** — a "Probe" button appears per model, plus a
-   provider-wide "Probe all": the host half sends a minimal request carrying a
-   1×1 PNG through DSH's LLM runtime to measure first-token latency, total
-   time, and whether the upstream accepts images; it also runs `/v1/models`
-   discovery and backfills missing `contextWindow`/`maxTokens` (hand-set
-   values are never overwritten).
+4. **Built-in probe & liveness** — each model row shows two buttons:
+   - **Capabilities** (zero-cost): calls `/v1/models` to fetch
+     `contextWindow`/`maxTokens` and backfills missing fields (hand-set
+     values are never overwritten).
+   - **Deep probe** (fallback, token-cost): the host sends a minimal request
+     carrying a 1×1 PNG through DSH's LLM runtime to measure first-token
+     latency, total time, and whether the upstream accepts images.
+   Provider card headers show an up/down/untested badge and each model row a
+   matching status dot, aggregated from the latest results.
 
 ### Install
 

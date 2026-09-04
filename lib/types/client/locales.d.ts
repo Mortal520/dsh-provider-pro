@@ -21,7 +21,8 @@ export declare const zh: {
     readonly models: '模型';
     readonly imageInput: '支持图片输入';
     readonly probing: '探测中…';
-    readonly probe: '探测';
+    readonly capabilities: '能力获取';
+    readonly deepProbe: '深度探测';
     readonly probeAll: '一键探测';
 };
 export declare const en: {
@@ -46,7 +47,8 @@ export declare const en: {
     readonly models: 'Models';
     readonly imageInput: 'Support image input';
     readonly probing: 'Probing…';
-    readonly probe: 'Probe';
+    readonly capabilities: 'Capabilities';
+    readonly deepProbe: 'Deep probe';
     readonly probeAll: 'Probe all';
 };
 export type LocaleKey = keyof typeof zh | keyof typeof en;

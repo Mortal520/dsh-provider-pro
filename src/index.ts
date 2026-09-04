@@ -193,20 +193,24 @@ function reasonText(reason: unknown): string {
 }
 
 /**
- * Run one real probe through DSH's LLM runtime: a minimal request carrying a
- * 1×1 PNG (image admission exercised on the actual wire) plus a text request
- * fallback when no attachment store is mounted. Measures first-token latency,
- * total time, and whether the upstream rejected the image.
+ * Run one capability/deep probe through DSH's LLM runtime.
  *
- * Alongside the latency probe it runs model discovery for the provider and
- * includes each model's `contextWindow`/`maxTokens` so the client can show
- * them and backfill any model that lacks them in settings.
+ * - `mode: 'capabilities'` — zero-token: calls `discoverModels`
+ *   (GET /v1/models) and returns each model's `contextWindow`/`maxTokens`.
+ *   This is the primary, cost-free source for model capacity. Through a
+ *   relaying gateway the listing may be generic — treat it as a declared
+ *   reference, not measured truth.
+ * - `mode: 'deep'` — fallback, token-cost: streams a minimal request carrying
+ *   a 1×1 PNG (image admission exercised on the actual wire; text-only when
+ *   no attachment store is mounted) and measures first-token latency, total
+ *   time, and whether the upstream accepted the image.
  */
 async function runProbe(
   ctx: Context,
   provider: string,
   baseURL: string | undefined,
   model: string,
+  mode: 'capabilities' | 'deep',
 ): Promise<Record<string, unknown>> {
   const startedAt = Date.now()
   const llm = (ctx as unknown as { get(key: string): unknown }).get('llm') as
@@ -216,7 +220,7 @@ async function runProbe(
       }
     | undefined
   if (llm === undefined || typeof llm.stream !== 'function') {
-    return { ok: false, error: 'LLM runtime not available' }
+    return { ok: false, mode, error: 'LLM runtime not available' }
   }
 
   // Discover the provider's models (contextWindow/maxTokens) so we can
@@ -233,8 +237,24 @@ async function runProbe(
   }
   const thisModel = discovered.find((entry) => entry.id === model)
 
-  // Try to mint a durable image attachment for the probe; fall back to
-  // text-only if the attachment store is absent.
+  // Capabilities-only mode: no wire inference, no token cost. If discovery
+  // failed entirely, report it so the client can fall back to a deep probe.
+  if (mode === 'capabilities') {
+    if (discoveryError !== undefined) {
+      return { ok: false, mode, totalMs: Date.now() - startedAt, error: discoveryError, discovery: { error: discoveryError } }
+    }
+    return {
+      ok: true,
+      mode,
+      totalMs: Date.now() - startedAt,
+      contextWindow: thisModel?.contextWindow,
+      maxTokens: thisModel?.maxTokens,
+      models: discovered,
+    }
+  }
+
+  // Deep mode: real stream probe (image admission + latency).
+  // Try to mint a durable image attachment; fall back to text-only.
   let attachment: unknown
   let imageProbe = false
   try {
@@ -277,6 +297,7 @@ async function runProbe(
     }
     return {
       ok: true,
+      mode,
       firstTokenMs,
       totalMs: Date.now() - startedAt,
       finishReason: finishReason || 'stop',
@@ -292,6 +313,7 @@ async function runProbe(
     const imageRejected = /image|media|vision|multimodal|unsupported.*(?:content|type|image)/i.test(lower)
     return {
       ok: false,
+      mode,
       totalMs: Date.now() - startedAt,
       imageProbe,
       imageSupported: imageRejected ? false : undefined,
@@ -401,7 +423,7 @@ export function apply(ctx: Context) {
         const section = readSection(ctx) as Record<string, unknown> | undefined
         const req = section?.[PROBE_REQ_FLAG]
         if (req === undefined || req === null || typeof req !== 'object') return
-        const { id, provider, model } = req as { id?: unknown; provider?: unknown; model?: unknown }
+        const { id, provider, model, mode } = req as { id?: unknown; provider?: unknown; model?: unknown; mode?: unknown }
         if (typeof id !== 'string' || typeof provider !== 'string' || typeof model !== 'string') return
         if (id === lastProbeId) return
         lastProbeId = id
@@ -409,11 +431,13 @@ export function apply(ctx: Context) {
         const providers = (section?.providers ?? {}) as Record<string, { baseURL?: unknown; models?: Array<{ id?: unknown; contextWindow?: unknown; maxTokens?: unknown }> } | undefined>
         const profile = providers[provider]
         const baseURL = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
+        const probeMode: 'capabilities' | 'deep' = mode === 'deep' ? 'deep' : 'capabilities'
         try {
-          const result = await runProbe(ctx, provider, baseURL, model)
+          const result = await runProbe(ctx, provider, baseURL, model, probeMode)
           // Capacity backfill: for every declared model that lacks
           // contextWindow/maxTokens, write the discovered value. Only fills
-          // missing fields — hand-set values are never overwritten.
+          // missing fields — hand-set values are never overwritten. Applies
+          // only when discovery returned a real listing.
           const discovered = Array.isArray(result.models) ? result.models as Array<{ id: string; contextWindow?: number; maxTokens?: number }> : []
           const models = profile?.models
           let backfilled = 0
@@ -428,7 +452,7 @@ export function apply(ctx: Context) {
               return copy
             })
             const backfillApi = settingsApi(ctx)
-          if (changed && backfillApi !== undefined) {
+            if (changed && backfillApi !== undefined) {
               await backfillApi.mutate(NS, [{ op: 'set', path: ['providers', provider, 'models'], value: next }])
               backfilled = next.reduce((n, e, i) => n + (e.contextWindow !== models[i]?.contextWindow || e.maxTokens !== models[i]?.maxTokens ? 1 : 0), 0)
             }

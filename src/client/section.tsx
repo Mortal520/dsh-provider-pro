@@ -117,6 +117,20 @@ const css = `
 .dpp-probe-result { font-size: 12px; color: var(--dsw-alias-label-secondary); padding: 4px 0 2px; line-height: 18px; }
 .dpp-probe-ok { color: var(--dsw-alias-state-success-primary); }
 .dpp-probe-fail { color: var(--dsw-alias-state-error-primary); }
+.dpp-alive-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--dsw-alias-border-l2);
+}
+.dpp-alive-dot.up { background: var(--dsw-alias-state-success-primary); }
+.dpp-alive-dot.down { background: var(--dsw-alias-state-error-primary); }
+.dpp-alive-dot.unknown { background: var(--dsw-alias-border-l3); }
+.dpp-provider-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; border-radius: 9px; font-size: 12px;
+  border: 1px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-tertiary);
+}
+.dpp-provider-badge.up { background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 14%, transparent); color: var(--dsw-alias-state-success-primary); border-color: transparent; }
+.dpp-provider-badge.down { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent); color: var(--dsw-alias-state-error-primary); border-color: transparent; }
 `
 
 let styleInjected = false
@@ -169,6 +183,7 @@ interface HostProbeResult {
   provider: string
   model: string
   ok: boolean
+  mode?: 'capabilities' | 'deep'
   firstTokenMs?: number | null
   totalMs?: number
   finishReason?: string
@@ -198,6 +213,7 @@ async function sendProbeRequest(
   provider: string,
   model: string,
   events: SectionEvents,
+  mode: 'capabilities' | 'deep',
 ): Promise<ProbeResult> {
   const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   // Freshest revision: the write advances the document, and probe-all walks
@@ -210,7 +226,7 @@ async function sendProbeRequest(
   // Clear any stale result for this probe; write the request. The host reacts
   // on the resulting settings/updated, runs the probe, then publishes.
   const write = await api.mutate(NS, [
-    { op: 'set', path: [PROBE_REQ_FLAG], value: { id, provider, model } },
+    { op: 'set', path: [PROBE_REQ_FLAG], value: { id, provider, model, mode } },
   ], nsView.revision)
   if (!write.ok) {
     return { status: 'failure', provider, model, failure: { code: 'WRITE_FAIL', message: write.error?.message ?? 'probe request write failed' } }
@@ -262,7 +278,9 @@ async function sendProbeRequest(
     return {
       status: 'failure', provider, model, totalMs: answer.totalMs,
       failure: {
-        code: answer.imageSupported === false ? 'IMAGE_UNSUPPORTED' : 'PROBE_FAIL',
+        code: answer.mode === 'capabilities' && answer.error !== undefined
+          ? 'CAPABILITIES_FAIL'
+          : (answer.imageSupported === false ? 'IMAGE_UNSUPPORTED' : 'PROBE_FAIL'),
         message: answer.error ?? (answer.imageSupported === false ? 'model does not accept image input' : 'probe failed'),
       },
     }
@@ -270,6 +288,18 @@ async function sendProbeRequest(
   const caps: string[] = []
   if (answer.contextWindow !== undefined) caps.push(`ctx: ${answer.contextWindow}`)
   if (answer.maxTokens !== undefined) caps.push(`max: ${answer.maxTokens}`)
+  if (answer.mode === 'capabilities') {
+    // Zero-cost: just the declared/gateway-reported capacity.
+    if (caps.length === 0) caps.push('no capacity info')
+    if (answer.backfilled !== undefined && answer.backfilled > 0) caps.push(`backfilled: ${answer.backfilled}`)
+    return {
+      status: 'success', provider, model, totalMs: answer.totalMs,
+      firstTokenMs: answer.firstTokenMs,
+      finishReason: caps.join(' · '),
+      usage: {},
+    }
+  }
+  // Deep probe: latency + image acceptance on top of capacity.
   caps.push(`first-token: ${answer.firstTokenMs ?? 'n/a'}ms`)
   if (answer.totalMs !== undefined) caps.push(`total: ${answer.totalMs}ms`)
   caps.push(`reason: ${answer.finishReason ?? 'stop'}`)
@@ -325,11 +355,11 @@ function ModelRow(props: {
     if (response.ok) onMutated()
   }
 
-  const runProbe = async () => {
+  const runProbe = async (mode: 'capabilities' | 'deep') => {
     setProbeBusy(true)
     setProbeResult(undefined)
     try {
-      setProbeResult(await sendProbeRequest(api, route, model.id, events))
+      setProbeResult(await sendProbeRequest(api, route, model.id, events, mode))
     } catch (error: unknown) {
       const err = error as { message?: string }
       setProbeResult({ status: 'failure', provider: route, model: model.id, totalMs: 0, failure: { code: 'ERROR', message: err.message ?? String(error) } })
@@ -338,8 +368,15 @@ function ModelRow(props: {
     }
   }
 
+  // Alive status: capabilities success (gateway reachable) or deep success
+  // (real inference worked) both mean the model responds.
+  const aliveStatus: 'up' | 'down' | 'unknown' = displayResult === undefined
+    ? 'unknown'
+    : (displayResult.status === 'success' ? 'up' : 'down')
+
   return (
     <div className="dpp-model-row">
+      <span className={'dpp-alive-dot ' + aliveStatus} title={aliveStatus} />
       <span className="dpp-model-id" title={model.id}>{model.id}</span>
       <label className="dpp-model-cb">
         <input
@@ -349,8 +386,11 @@ function ModelRow(props: {
         />
         <span className="dpp-model-cb-label">{t('imageInput')}</span>
       </label>
-      <button type="button" className="dpp-probe-btn" disabled={probeBusy} onClick={() => void runProbe()}>
-        {probeBusy ? t('probing') : t('probe')}
+      <button type="button" className="dpp-probe-btn" disabled={probeBusy} onClick={() => void runProbe('capabilities')}>
+        {probeBusy ? t('probing') : t('capabilities')}
+      </button>
+      <button type="button" className="dpp-probe-btn" disabled={probeBusy} onClick={() => void runProbe('deep')}>
+        {probeBusy ? t('probing') : t('deepProbe')}
       </button>
       {displayResult ? (
         <span className={'dpp-probe-result ' + (displayResult.status === 'success' ? 'dpp-probe-ok' : 'dpp-probe-fail')}>
@@ -417,15 +457,29 @@ function ProviderCard(props: {
     setProbeAllBusy(true)
     setProbeAllResults(new Map())
     const results = new Map<string, ProbeResult>()
+    // Primary: zero-cost capability discovery for every model (§/v1/models).
+    // If discovery is unavailable (relay gateway), a model's deep probe can
+    // still be run individually — that stays the costful fallback.
     for (const model of profile.models) {
-      results.set(model.id, await sendProbeRequest(api, route, model.id, events))
+      results.set(model.id, await sendProbeRequest(api, route, model.id, events, 'capabilities'))
       setProbeAllResults(new Map(results))
     }
     setProbeAllBusy(false)
   }
+
+  // Provider-level alive badge: aggregated from per-model results. Any
+  // success = up; all failures = down; none run yet = untested.
+  const providerAlive: 'up' | 'down' | 'unknown' = (() => {
+    if (probeAllResults.size === 0) return 'unknown'
+    const values = [...probeAllResults.values()]
+    return values.some((r) => r.status === 'success') ? 'up' : 'down'
+  })()
   return (
     <div className="dpp-card" role="group" aria-label={displayName}>
       <div className="dpp-card-header">
+        <span className={'dpp-provider-badge ' + providerAlive} title={providerAlive}>
+          {providerAlive === 'up' ? '✓' : providerAlive === 'down' ? '✗' : '·'}
+        </span>
         <span className="dpp-provider">{displayName}</span>
         <code className="dpp-code">{route}</code>
         <span className="dpp-muted">{baseURLMeta}</span>

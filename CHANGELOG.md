@@ -9,18 +9,17 @@ All notable changes to dsh-provider-pro.
   "Support image input" checkbox; checking it writes
   `input: [text, image]` to the model entry in `settings.yaml`
   so DSH allows image attachments for that model.
-- **Built-in host-side probe**: each model row gains a "Probe"
-  button (plus a provider-wide "Probe all") that asks the host
-  half to run a real minimal request through DSH's LLM runtime —
-  carrying a 1×1 PNG to exercise image admission — and reports
-  first-token latency, total time, finish reason, and whether the
-  upstream accepted the image. Host and client exchange through
-  the `llm-pi-ai` user layer (settings IPC), so no extra service
-  or process restart is needed.
-- **Context-window auto-fill**: the probe also runs model
-  discovery (`/v1/models`) for the provider and backfills
-  `contextWindow`/`maxTokens` into any declared model that lacks
-  them — hand-set values are never overwritten.
+- **Built-in probe**: each model row gains "Capabilities" (zero-cost
+  `discoverModels` / GET /v1/models — contextWindow/maxTokens, with
+  auto-backfill of missing fields) and "Deep probe" (fallback: a real
+  minimal stream request carrying a 1×1 PNG to exercise image admission
+  and measure latency). Provider-wide "Probe all" walks every model in
+  capabilities mode by default. Host and client exchange through the
+  `llm-pi-ai` user layer (settings IPC), so no extra service or process
+  restart is needed.
+- **Alive-status UI**: each provider card header shows an up/down/untested
+  badge, and each model row a matching status dot — aggregated from the
+  latest probe results.
 
 ### Changed
 - Provider cards now render the full model list below the
