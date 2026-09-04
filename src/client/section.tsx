@@ -200,11 +200,18 @@ async function sendProbeRequest(
   events: SectionEvents,
 ): Promise<ProbeResult> {
   const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  // Freshest revision: the write advances the document, and probe-all walks
+  // many models in sequence, so a section-load snapshot goes stale quickly.
+  const snapshot = await api.describe().then((r) => (r.ok ? r.value : undefined)).catch(() => undefined)
+  const nsView = snapshot?.namespaces.find((entry) => entry.ns === NS)
+  if (nsView === undefined) {
+    return { status: 'failure', provider, model, failure: { code: 'NO_NS', message: 'llm-pi-ai namespace not readable' } }
+  }
   // Clear any stale result for this probe; write the request. The host reacts
   // on the resulting settings/updated, runs the probe, then publishes.
   const write = await api.mutate(NS, [
     { op: 'set', path: [PROBE_REQ_FLAG], value: { id, provider, model } },
-  ])
+  ], nsView.revision)
   if (!write.ok) {
     return { status: 'failure', provider, model, failure: { code: 'WRITE_FAIL', message: write.error?.message ?? 'probe request write failed' } }
   }
@@ -243,7 +250,11 @@ async function sendProbeRequest(
   if (answer === undefined) {
     // Timeout: likely the host probe never ran (LLM runtime absent) or the
     // request is stuck. Clean the request slot so a retry re-fires.
-    void api.mutate(NS, [{ op: 'unset', path: [PROBE_REQ_FLAG] }]).catch(() => undefined)
+    const fresh = await api.describe().then((r) => (r.ok ? r.value : undefined)).catch(() => undefined)
+    const freshNs = fresh?.namespaces.find((entry) => entry.ns === NS)
+    if (freshNs !== undefined) {
+      void api.mutate(NS, [{ op: 'unset', path: [PROBE_REQ_FLAG] }], freshNs.revision).catch(() => undefined)
+    }
     return { status: 'failure', provider, model, failure: { code: 'TIMEOUT', message: 'probe timed out (host probe did not respond)' } }
   }
 
