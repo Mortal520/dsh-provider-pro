@@ -134,11 +134,14 @@ const css = `
 .dpp-alive-dot.up { background: var(--dsw-alias-state-success-primary); }
 .dpp-alive-dot.down { background: var(--dsw-alias-state-error-primary); }
 .dpp-alive-dot.unknown { background: var(--dsw-alias-border-l3); }
+/* Credential-pool cooldown: not down, just temporarily out of quota. */
+.dpp-alive-dot.cooldown { background: var(--dsw-alias-state-warning-primary, #e6a700); }
 .dpp-provider-badge {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 18px; height: 18px; border-radius: 9px; font-size: 12px;
   border: 1px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-tertiary);
 }
+.dpp-provider-badge.cooldown { color: var(--dsw-alias-state-warning-primary, #e6a700); border-color: var(--dsw-alias-state-warning-primary, #e6a700); }
 .dpp-provider-badge.up { background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 14%, transparent); color: var(--dsw-alias-state-success-primary); border-color: transparent; }
 .dpp-provider-badge.down { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent); color: var(--dsw-alias-state-error-primary); border-color: transparent; }
 `
@@ -319,6 +322,20 @@ async function sendProbeRequest(
     }
     const raw = answer.error ?? (answer.imageSupported === false ? 'model does not accept image input' : 'probe failed')
     const base = compactWireError(raw)
+    // Credential-pool cooldown: the gateway told us exactly when quota
+    // resets. Surface it as its own failure code so the UI can show an
+    // amber "cooling" state instead of a red "down".
+    const resetSecondsRaw = raw.match(/"reset_seconds"\s*:\s*(\d+)/)?.[1]
+    const resetTimeHms = raw.match(/"reset_time"\s*:\s*"(\d+h\d+m\d+s)"/)?.[1]
+    const resetSeconds = resetSecondsRaw !== undefined
+      ? Number(resetSecondsRaw)
+      : resetTimeHms !== undefined
+        ? resetTimeHms.split(/[hms]/).filter(Boolean).reduce((acc, part, i) => acc + Number(part) * [3600, 60, 1].at(i)!, 0)
+        : undefined
+    const cooldownUntil = resetSeconds !== undefined && Number.isFinite(resetSeconds) ? Date.now() + resetSeconds * 1000 : undefined
+    const code = cooldownUntil !== undefined
+      ? 'COOLDOWN'
+      : answer.imageSupported === false ? 'IMAGE_UNSUPPORTED' : 'PROBE_FAIL'
     // Role-repair note: the deep probe hit a role rejection and the host
     // verified + repaired (or could not repair) the developer-role compat.
     const note = answer.roleFix === 'fixed'
@@ -329,8 +346,9 @@ async function sendProbeRequest(
     return {
       status: 'failure', provider, model, totalMs: answer.totalMs,
       failure: {
-        code: answer.imageSupported === false ? 'IMAGE_UNSUPPORTED' : 'PROBE_FAIL',
+        code,
         message: note !== undefined ? base + note : base,
+        cooldownUntil,
       },
     }
   }
@@ -452,15 +470,26 @@ function ModelRow(props: {
     }
   }
 
-  // Alive status: capabilities success (gateway reachable) or deep success
-  // (real inference worked) both mean the model responds.
-  const aliveStatus: 'up' | 'down' | 'unknown' = displayResult === undefined
+  // Alive status: success = up; a credential-pool cooldown failure = its
+  // own amber state (gateway reachable, model quota exhausted); other
+  // failures = down.
+  const aliveStatus: 'up' | 'down' | 'unknown' | 'cooldown' = displayResult === undefined
     ? 'unknown'
-    : (displayResult.status === 'success' ? 'up' : 'down')
+    : displayResult.status === 'success'
+      ? 'up'
+      : displayResult.failure?.cooldownUntil !== undefined && displayResult.failure.cooldownUntil > Date.now()
+        ? 'cooldown'
+        : 'down'
+  const cooldownHint = aliveStatus === 'cooldown' && displayResult?.status === 'failure'
+    ? (() => {
+        const mins = Math.max(1, Math.round((displayResult.failure!.cooldownUntil! - Date.now()) / 60000))
+        return mins >= 60 ? `冷却中 ~${Math.floor(mins / 60)}h${mins % 60}m` : `冷却中 ~${mins}m`
+      })()
+    : undefined
 
   return (
     <div className="dpp-model-row">
-      <span className={'dpp-alive-dot ' + aliveStatus} title={aliveStatus} />
+      <span className={'dpp-alive-dot ' + aliveStatus} title={cooldownHint ?? aliveStatus} />
       <span className="dpp-model-id" title={model.id}>{model.id}</span>
       {declaredCaps.length > 0 ? (
         <span className="dpp-model-caps" title={capsTitle}>
@@ -541,29 +570,42 @@ function ProviderCard(props: {
   const probeAll = async () => {
     if (!profile.models?.length) return
     setProbeAllBusy(true)
-    setProbeAllResults(new Map())
+    // Models with a known, still-active credential cooldown are skipped —
+    // the gateway answered authoritatively for hours; re-hitting it adds
+    // nothing. Their previous result stays on display.
+    const previous = probeAllResults
+    const now = Date.now()
     const results = new Map<string, ProbeResult>()
-    // Same full probe as the per-model button, walked across the roster:
-    // each result also feeds the provider-level alive badge.
     for (const model of profile.models) {
+      const priorCooldown = previous.get(model.id)?.failure?.cooldownUntil
+      if (priorCooldown !== undefined && priorCooldown > now) {
+        results.set(model.id, previous.get(model.id)!)
+        continue
+      }
       results.set(model.id, await sendProbeRequest(api, route, model.id, events, 'full'))
       setProbeAllResults(new Map(results))
     }
+    setProbeAllResults(new Map(results))
     setProbeAllBusy(false)
   }
 
   // Provider-level alive badge: aggregated from per-model results. Any
-  // success = up; all failures = down; none run yet = untested.
-  const providerAlive: 'up' | 'down' | 'unknown' = (() => {
+  // success = up; every model cooling = cooling; all hard failures = down;
+  // none run yet = untested.
+  const providerAlive: 'up' | 'down' | 'unknown' | 'cooldown' = (() => {
     if (probeAllResults.size === 0) return 'unknown'
     const values = [...probeAllResults.values()]
-    return values.some((r) => r.status === 'success') ? 'up' : 'down'
+    if (values.some((r) => r.status === 'success')) return 'up'
+    if (values.every((r) => r.status === 'failure' && (r.failure?.cooldownUntil === undefined || r.failure.cooldownUntil > Date.now()))
+      && values.some((r) => r.failure?.cooldownUntil !== undefined)) return 'cooldown'
+    return 'down'
   })()
+  const badgeMark = providerAlive === 'up' ? '✓' : providerAlive === 'down' ? '✗' : providerAlive === 'cooldown' ? '◷' : '·'
   return (
     <div className="dpp-card" role="group" aria-label={displayName}>
       <div className="dpp-card-header">
         <span className={'dpp-provider-badge ' + providerAlive} title={providerAlive}>
-          {providerAlive === 'up' ? '✓' : providerAlive === 'down' ? '✗' : '·'}
+          {badgeMark}
         </span>
         <span className="dpp-provider">{displayName}</span>
         <code className="dpp-code">{route}</code>

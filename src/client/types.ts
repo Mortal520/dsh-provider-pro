@@ -103,5 +103,7 @@ export interface ProbeResult {
     message: string
     category?: string
     status?: number
+    /** Credential-pool cooldown: epoch-ms when the gateway says quota resets. */
+    cooldownUntil?: number
   }
 }
