@@ -199,6 +199,10 @@ interface HostProbeResult {
   finishReason?: string
   imageProbe?: boolean
   imageSupported?: boolean
+  /** Measured image verdict from the stream probe. */
+  imageVerdict?: 'accepted' | 'rejected'
+  /** The input declaration was rewritten to match the measurement. */
+  imageSynced?: boolean
   /** developer-role admission: admitted = wire accepts developer, fixed = compat written, already = already off. */
   roleFix?: 'admitted' | 'fixed' | 'already' | 'failed'
   /** Efforts probe: wire-accepted levels + refused ones + whether settings were rewritten. */
@@ -344,8 +348,9 @@ async function sendProbeRequest(
     else parts.push('efforts: none')
     if (answer.unsupported !== undefined && answer.unsupported.length > 0) parts.push(`rejected: ${answer.unsupported.join('/')}`)
     if (answer.unknown !== undefined && answer.unknown.length > 0) parts.push(`flaky: ${answer.unknown.join('/')}`)
-    if (answer.imageProbe) parts.push('image: accepted')
-    else if (answer.imageSupported === false) parts.push('image: rejected')
+    if (answer.imageVerdict === 'accepted') parts.push('image: accepted')
+    else if (answer.imageVerdict === 'rejected') parts.push('image: rejected')
+    if (answer.imageSynced) parts.push('input synced')
     if (answer.firstTokenMs !== undefined && answer.firstTokenMs !== null) parts.push(`first-token: ${answer.firstTokenMs}ms`)
     if (answer.changed) parts.push('written')
     if (answer.backfilled !== undefined && answer.backfilled > 0) parts.push(`backfilled: ${answer.backfilled}`)

@@ -33,6 +33,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import {
   FILL_REASONING_EFFORTS,
+  INPUT_WITH_IMAGE,
   LEGACY_REASONING_EFFORTS,
   matchesEfforts,
   PROBE_REQ_FLAG,
@@ -455,6 +456,8 @@ async function runFullProbe(
     : [{ type: 'text', text: 'Reply with OK.' }]
   let firstTokenMs: number | null = null
   let finishReason = ''
+  let imageVerdict: 'accepted' | 'rejected' | undefined
+  let streamError: string | undefined
   try {
     const stream = llm.stream({
       provider,
@@ -470,6 +473,50 @@ async function runFullProbe(
         finishReason = reasonText((chunk as { reason?: unknown }).reason)
       }
     }
+    if (imageProbe) imageVerdict = 'accepted'
+  } catch (error) {
+    streamError = error instanceof Error ? error.message : String(error)
+    if (imageProbe && /image|media|vision|multimodal|unsupported.*(?:content|type|image)/i.test(streamError)) {
+      imageVerdict = 'rejected'
+    }
+  }
+
+  // 5. Declaration sync — the image-input checkbox is a declaration DSH
+  // acts on, so a measured acceptance checks it and a measured rejection
+  // clears it. Fresh read + whole-array mutate (same shape as the client
+  // toggle), written only when the declaration disagrees with the
+  // measurement; never touched when no verdict was reached.
+  let imageSynced = false
+  if (imageVerdict !== undefined) {
+    const settings = settingsApi(ctx)
+    const section = readSection(ctx) as
+      | { providers?: Record<string, { models?: Array<Record<string, unknown>> }> }
+      | undefined
+    const models = section?.providers?.[provider]?.models
+    if (settings !== undefined && Array.isArray(models)) {
+      const current = models.find((m) => m.id === model)
+      const declared = current !== undefined && Array.isArray(current.input) && (current.input as unknown[]).includes('image')
+      const measured = imageVerdict === 'accepted'
+      if (declared !== measured) {
+        const next = models.map((m) => {
+          if (m.id !== model) return m
+          const copy = { ...m }
+          if (measured) copy.input = [...INPUT_WITH_IMAGE]
+          else delete copy.input
+          return copy
+        })
+        try {
+          await settings.mutate(NS, [{ op: 'set', path: ['providers', provider, 'models'], value: next }])
+          imageSynced = true
+        } catch {
+          // best-effort sync — the verdict is still reported
+        }
+      }
+    }
+  }
+  const changedTotal = changed || imageSynced
+
+  if (streamError === undefined) {
     return {
       ok: baselineError === undefined && roleFix !== 'failed',
       mode: 'full',
@@ -477,39 +524,40 @@ async function runFullProbe(
       firstTokenMs,
       finishReason: finishReason || 'stop',
       imageProbe,
+      imageVerdict,
+      imageSynced,
       roleFix,
       levels,
       unsupported,
       unknown: unknownLevels,
       declaredNonReasoning,
       applied,
-      changed,
+      changed: changedTotal,
       backfilled,
       contextWindow: thisModel?.contextWindow,
       maxTokens: thisModel?.maxTokens,
       ...(baselineError !== undefined ? { error: baselineError } : {}),
     }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    const imageRejected = /image|media|vision|multimodal|unsupported.*(?:content|type|image)/i.test(message)
-    return {
-      ok: false,
-      mode: 'full',
-      totalMs: Date.now() - startedAt,
-      imageProbe,
-      imageSupported: imageRejected ? false : undefined,
-      roleFix,
-      levels,
-      unsupported,
-      unknown: unknownLevels,
-      declaredNonReasoning,
-      applied,
-      changed,
-      backfilled,
-      contextWindow: thisModel?.contextWindow,
-      maxTokens: thisModel?.maxTokens,
-      error: message,
-    }
+  }
+  return {
+    ok: false,
+    mode: 'full',
+    totalMs: Date.now() - startedAt,
+    imageProbe,
+    imageSupported: imageVerdict === 'rejected' ? false : undefined,
+    imageVerdict,
+    imageSynced,
+    roleFix,
+    levels,
+    unsupported,
+    unknown: unknownLevels,
+    declaredNonReasoning,
+    applied,
+    changed: changedTotal,
+    backfilled,
+    contextWindow: thisModel?.contextWindow,
+    maxTokens: thisModel?.maxTokens,
+    error: streamError,
   }
 }
 
