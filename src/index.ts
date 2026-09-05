@@ -288,12 +288,16 @@ async function runFullProbe(
     return { ok: false, mode: 'full', error: 'LLM runtime not available' }
   }
 
-  // 1. Discovery — declared capacity listing.
+  // 1. Discovery — declared capacity listing. Raced with a 10s cap so a
+  // hanging listing request cannot extend the probe without bound.
   let discovered: Array<{ id: string; contextWindow?: number; maxTokens?: number }> = []
   let discoveryError: string | undefined
   if (typeof llm.discoverModels === 'function' && baseURL !== undefined) {
     try {
-      discovered = await llm.discoverModels('llm-pi-ai', { provider, baseURL })
+      discovered = await Promise.race([
+        llm.discoverModels('llm-pi-ai', { provider, baseURL }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('discovery timed out (10s)')), 10000)),
+      ])
     } catch (error) {
       discoveryError = error instanceof Error ? error.message : String(error)
     }
@@ -467,15 +471,44 @@ async function runFullProbe(
       messages: [{ role: 'user', content }],
       maxTokens: 8,
     }) as AsyncIterable<ProbeChunk>
-    for await (const chunk of stream) {
+    // 30s budget, enforced per-chunk with a race: a relay that stalls
+    // BEFORE the first token must not block the probe forever (an
+    // unbounded stream let the whole probe outrun the client wait cap —
+    // the user saw TIMEOUT followed by a late checkbox sync from exactly
+    // this). Budget expiry is not an error: first token seen = the wire
+    // accepted the request (verdict stands); nothing seen = inconclusive
+    // (no verdict, no declaration write).
+    const deadline = Date.now() + 30000
+    const iterator = (stream as AsyncIterableIterator<ProbeChunk>)[Symbol.asyncIterator]()
+    while (true) {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) {
+        finishReason = finishReason || 'probe budget (30s) exceeded'
+        break
+      }
+      const next = await new Promise<IteratorResult<ProbeChunk> | undefined>((resolve, reject) => {
+        const timer = setTimeout(() => resolve(undefined), remaining)
+        iterator.next().then(
+          (value) => { clearTimeout(timer); resolve(value) },
+          (error: unknown) => { clearTimeout(timer); reject(error) },
+        )
+      })
+      if (next === undefined) {
+        finishReason = finishReason || 'probe budget (30s) exceeded'
+        break
+      }
+      if (next.done === true) break
+      const chunk = next.value
       if (firstTokenMs === null && chunk.type === 'text-delta') {
         firstTokenMs = Date.now() - startedAt
       }
       if (chunk.type === 'finish') {
         finishReason = reasonText((chunk as { reason?: unknown }).reason)
+        break
       }
     }
-    if (imageProbe) imageVerdict = 'accepted'
+    void iterator.return?.()
+    if (imageProbe && firstTokenMs !== null) imageVerdict = 'accepted'
   } catch (error) {
     streamError = error instanceof Error ? error.message : String(error)
     if (imageProbe && /image|media|vision|multimodal|unsupported.*(?:content|type|image)/i.test(streamError)) {
