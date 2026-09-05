@@ -318,15 +318,28 @@ async function runFullProbe(
   const ambiguous = (probe: WireProbe): boolean => probe.status === 0 || probe.status === 429 || probe.status >= 500
   if (canWire) {
     const apiKey = await resolveProviderKey(ctx, profile?.apiKeyEnv)
-    const send = (messages: unknown[], extra: Record<string, unknown> = {}): Promise<WireProbe> =>
-      // 4, not 1: GLM-style relays reject max_tokens <= 2 outright
-      // ("max_tokens must be greater than 2").
-      wirePost(baseURL!, apiKey, { model, messages, max_tokens: 4, ...extra })
+    // Wire shapes mirror what pi-ai actually sends: a system-position
+    // message followed by a user message. Single-message probes (a lone
+    // system/user/developer) are refused by some relays with a misleading
+    // "messages 参数非法" — measured on a GLM relay: user+system passes
+    // where single-message shapes fail or misreport.
+    const send = (role: string, extra: Record<string, unknown> = {}): Promise<WireProbe> =>
+      wirePost(baseURL!, apiKey, {
+        model,
+        messages: [
+          { role, content: 'Reply OK' },
+          { role: 'user', content: 'Reply OK' },
+        ],
+        // 4, not 1: GLM-style relays reject max_tokens <= 2 outright
+        // ("max_tokens must be greater than 2").
+        max_tokens: 4,
+        ...extra,
+      })
     // Baseline: a plain user message must pass or the rest is meaningless.
     // One retry for an ambiguous failure (transient relay stall).
-    let baseline = await send([{ role: 'user', content: 'Reply OK' }])
+    let baseline = await send('user')
     if (!baseline.ok && ambiguous(baseline)) {
-      baseline = await send([{ role: 'user', content: 'Reply OK' }])
+      baseline = await send('user')
     }
     if (!baseline.ok) {
       baselineError = baseline.status === 0 ? `unreachable: ${baseline.body}` : `baseline ${baseline.status}: ${baseline.body}`
@@ -336,11 +349,11 @@ async function runFullProbe(
       if (compat.supportsDeveloperRole === false) {
         roleFix = 'already'
       } else {
-        const dev = await send([{ role: 'developer', content: 'Reply OK' }])
+        const dev = await send('developer')
         if (dev.ok) {
           roleFix = 'admitted'
         } else if (refused(dev)) {
-          const sys = await send([{ role: 'system', content: 'Reply OK' }])
+          const sys = await send('system')
           roleFix = sys.ok ? 'fixed' : 'failed'
         }
         // else: ambiguous developer result — leave the compat untouched.
@@ -359,9 +372,9 @@ async function runFullProbe(
         const verdicts = await Promise.all((['low', 'medium', 'high', 'max'] as const).map(async (level) => {
           const declaredWire = declared?.[level]
           const wire = typeof declaredWire === 'string' && declaredWire.length > 0 ? declaredWire : level
-          let probe = await send([{ role: probeRole, content: 'Reply OK' }], { reasoning_effort: wire })
+          let probe = await send(probeRole, { reasoning_effort: wire })
           if (!probe.ok && ambiguous(probe)) {
-            probe = await send([{ role: probeRole, content: 'Reply OK' }], { reasoning_effort: wire })
+            probe = await send(probeRole, { reasoning_effort: wire })
           }
           return { level, probe }
         }))
