@@ -17,6 +17,10 @@ export const NS = 'llm-pi-ai'
 export interface ProviderModel {
   id: string
   input?: string[]
+  /** Declared context window (tokens) — hand-set or backfilled by the probe. */
+  contextWindow?: number
+  /** Declared max output tokens — hand-set or backfilled by the probe. */
+  maxTokens?: number
   [key: string]: unknown
 }
 

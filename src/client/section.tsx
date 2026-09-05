@@ -105,6 +105,12 @@ const css = `
 }
 .dpp-model-row:last-child { border-bottom: none; }
 .dpp-model-id { font-family: var(--ds-font-family-code); color: var(--dsw-alias-label-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.dpp-model-caps { display: inline-flex; gap: 4px; flex: none; }
+.dpp-caps-chip {
+  font-family: var(--ds-font-family-code); font-size: 11px; line-height: 16px;
+  padding: 0 6px; border-radius: 8px; flex: none;
+  background: var(--dsw-alias-button-elevated-fill); color: var(--dsw-alias-label-secondary);
+}
 .dpp-model-cb { display: flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
 .dpp-model-cb input { width: 14px; height: 14px; accent-color: var(--dsw-alias-button-primary-fill); margin: 0; }
 .dpp-model-cb-label { color: var(--dsw-alias-label-secondary); }
@@ -336,6 +342,22 @@ function ModelRow(props: {
   // Merge: per-model probe result takes priority over probe-all result
   const displayResult = probeResult ?? probeAllResult
 
+  // Declared capacity from the settings entry (hand-set or probe-backfilled).
+  // Compact display: 1024-multiples render KiB-style (262144 → 256k),
+  // 1000-multiples decimal-style (200000 → 200k), anything else raw.
+  const fmtTokens = (n: number): string => {
+    if (n % 1024 === 0) return `${n / 1024}k`
+    if (n % 1000 === 0) return `${n / 1000}k`
+    return String(n)
+  }
+  const declaredCaps = [model.contextWindow, model.maxTokens].filter(
+    (n): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0,
+  )
+  const capsTitle = [
+    model.contextWindow !== undefined ? `ctx ${model.contextWindow}` : undefined,
+    model.maxTokens !== undefined ? `max ${model.maxTokens}` : undefined,
+  ].filter(Boolean).join(' · ')
+
   const toggleImage = async (next: boolean) => {
     // Build the full models array with the target model's input field updated.
     // Writing the whole array avoids pi-ai path-resolution issues with
@@ -378,6 +400,11 @@ function ModelRow(props: {
     <div className="dpp-model-row">
       <span className={'dpp-alive-dot ' + aliveStatus} title={aliveStatus} />
       <span className="dpp-model-id" title={model.id}>{model.id}</span>
+      {declaredCaps.length > 0 ? (
+        <span className="dpp-model-caps" title={capsTitle}>
+          {declaredCaps.map((n, i) => <span key={i} className="dpp-caps-chip">{fmtTokens(n)}</span>)}
+        </span>
+      ) : null}
       <label className="dpp-model-cb">
         <input
           type="checkbox"

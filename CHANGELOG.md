@@ -23,7 +23,10 @@ All notable changes to dsh-provider-pro.
 
 ### Changed
 - Provider cards now render the full model list below the
-  User-Agent field (collapsed by default).
+  User-Agent field (collapsed by default). Each model row shows
+  its declared `contextWindow`/`maxTokens` as compact chips
+  (hand-set or probe-backfilled values — the current source of
+  truth).
 - **Debt cleanup**: removed the dead `dsh-provider-probe` soft
   dependency, the unused `llmWire` client prop threading, and
   unused locale keys; probe waiting is now event-driven instead
