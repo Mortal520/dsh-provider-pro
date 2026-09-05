@@ -203,6 +203,8 @@ interface HostProbeResult {
   /** Ambiguous verdicts (timeout/429/5xx after retry) — never written back. */
   unknown?: string[]
   applied?: boolean
+  /** True only when the write actually changed content (dict/compat/backfill). */
+  changed?: boolean
   declaredNonReasoning?: boolean
   contextWindow?: number
   maxTokens?: number
@@ -327,7 +329,7 @@ async function sendProbeRequest(
     if (answer.imageProbe) parts.push('image: accepted')
     else if (answer.imageSupported === false) parts.push('image: rejected')
     if (answer.firstTokenMs !== undefined && answer.firstTokenMs !== null) parts.push(`first-token: ${answer.firstTokenMs}ms`)
-    if (answer.applied) parts.push('written')
+    if (answer.changed) parts.push('written')
     if (answer.backfilled !== undefined && answer.backfilled > 0) parts.push(`backfilled: ${answer.backfilled}`)
     return {
       status: 'success', provider, model, totalMs: answer.totalMs,

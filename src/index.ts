@@ -425,6 +425,10 @@ async function runFullProbe(
       }
     }
   }
+  // Whether the write actually changed content — a listing-only discovery
+  // with a matching dict still mutates (last-writer-wins consistency), but
+  // that must not display as "written".
+  const changed = dictChanged || compatChanged || backfilled > 0
 
   // 4. Image admission + latency — real stream through the LLM runtime,
   // after the role fix, so it exercises the exact post-fix configuration.
@@ -479,6 +483,7 @@ async function runFullProbe(
       unknown: unknownLevels,
       declaredNonReasoning,
       applied,
+      changed,
       backfilled,
       contextWindow: thisModel?.contextWindow,
       maxTokens: thisModel?.maxTokens,
@@ -499,6 +504,7 @@ async function runFullProbe(
       unknown: unknownLevels,
       declaredNonReasoning,
       applied,
+      changed,
       backfilled,
       contextWindow: thisModel?.contextWindow,
       maxTokens: thisModel?.maxTokens,
