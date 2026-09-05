@@ -518,14 +518,15 @@ async function runFullProbe(
   }
   const changedTotal = changed || imageSynced
 
-  if (streamError === undefined) {
+  // A stream error (non-image) is still a probe failure — the model did
+  // not answer, which is exactly what the alive dot reports.
+  if (streamError !== undefined) {
     return {
-      ok: baselineError === undefined && roleFix !== 'failed',
+      ok: false,
       mode: 'full',
       totalMs: Date.now() - startedAt,
-      firstTokenMs,
-      finishReason: finishReason || 'stop',
       imageProbe,
+      imageSupported: imageVerdict === 'rejected' ? false : undefined,
       imageVerdict,
       imageSynced,
       roleFix,
@@ -538,15 +539,16 @@ async function runFullProbe(
       backfilled,
       contextWindow: thisModel?.contextWindow,
       maxTokens: thisModel?.maxTokens,
-      ...(baselineError !== undefined ? { error: baselineError } : {}),
+      error: streamError,
     }
   }
   return {
-    ok: false,
+    ok: baselineError === undefined && roleFix !== 'failed',
     mode: 'full',
     totalMs: Date.now() - startedAt,
+    firstTokenMs,
+    finishReason: finishReason || 'stop',
     imageProbe,
-    imageSupported: imageVerdict === 'rejected' ? false : undefined,
     imageVerdict,
     imageSynced,
     roleFix,
@@ -559,7 +561,7 @@ async function runFullProbe(
     backfilled,
     contextWindow: thisModel?.contextWindow,
     maxTokens: thisModel?.maxTokens,
-    error: streamError,
+    ...(baselineError !== undefined ? { error: baselineError } : {}),
   }
 }
 
