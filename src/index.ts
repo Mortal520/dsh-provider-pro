@@ -307,27 +307,43 @@ async function runFullProbe(
   let roleFix: 'admitted' | 'fixed' | 'already' | 'failed' | 'skipped' = 'skipped'
   let levels: string[] = []
   let unsupported: string[] = []
+  let unknownLevels: string[] = []
   let declaredNonReasoning = false
   let baselineError: string | undefined
   const canWire = baseURL !== undefined && api === 'openai-completions' && entry !== undefined
+  // A genuinely refused request is a 4xx other than 429. Timeouts (0),
+  // rate limits, and upstream 5xx are AMBIGUOUS — never evidence of
+  // rejection; they get one retry, then stay "unknown".
+  const refused = (probe: WireProbe): boolean => probe.status >= 400 && probe.status < 500 && probe.status !== 429
+  const ambiguous = (probe: WireProbe): boolean => probe.status === 0 || probe.status === 429 || probe.status >= 500
   if (canWire) {
     const apiKey = await resolveProviderKey(ctx, profile?.apiKeyEnv)
     const send = (messages: unknown[], extra: Record<string, unknown> = {}): Promise<WireProbe> =>
-      wirePost(baseURL!, apiKey, { model, messages, max_tokens: 1, ...extra })
+      // 4, not 1: GLM-style relays reject max_tokens <= 2 outright
+      // ("max_tokens must be greater than 2").
+      wirePost(baseURL!, apiKey, { model, messages, max_tokens: 4, ...extra })
     // Baseline: a plain user message must pass or the rest is meaningless.
-    const baseline = await send([{ role: 'user', content: 'Reply OK' }])
+    // One retry for an ambiguous failure (transient relay stall).
+    let baseline = await send([{ role: 'user', content: 'Reply OK' }])
+    if (!baseline.ok && ambiguous(baseline)) {
+      baseline = await send([{ role: 'user', content: 'Reply OK' }])
+    }
     if (!baseline.ok) {
       baselineError = baseline.status === 0 ? `unreachable: ${baseline.body}` : `baseline ${baseline.status}: ${baseline.body}`
     } else {
-      // Role admission.
+      // Role admission — only a real 4xx refusal counts against developer.
       const compat = (entry!.compat ?? {}) as Record<string, unknown>
       if (compat.supportsDeveloperRole === false) {
         roleFix = 'already'
-      } else if ((await send([{ role: 'developer', content: 'Reply OK' }])).ok) {
-        roleFix = 'admitted'
       } else {
-        const systemOk = (await send([{ role: 'system', content: 'Reply OK' }])).ok
-        roleFix = systemOk ? 'fixed' : 'failed'
+        const dev = await send([{ role: 'developer', content: 'Reply OK' }])
+        if (dev.ok) {
+          roleFix = 'admitted'
+        } else if (refused(dev)) {
+          const sys = await send([{ role: 'system', content: 'Reply OK' }])
+          roleFix = sys.ok ? 'fixed' : 'failed'
+        }
+        // else: ambiguous developer result — leave the compat untouched.
       }
       // The role pi-ai will actually send: developer only when admitted.
       const probeRole = roleFix === 'admitted' ? 'developer' : 'system'
@@ -338,24 +354,37 @@ async function runFullProbe(
         const declared = (entry!.reasoningEfforts !== undefined && typeof entry!.reasoningEfforts === 'object' && entry!.reasoningEfforts !== null)
           ? entry!.reasoningEfforts as Record<string, unknown>
           : undefined
-        for (const level of ['low', 'medium', 'high', 'max'] as const) {
+        // In parallel: four sequential round-trips on a slow relay pushed
+        // the whole probe past the client's wait cap.
+        const verdicts = await Promise.all((['low', 'medium', 'high', 'max'] as const).map(async (level) => {
           const declaredWire = declared?.[level]
           const wire = typeof declaredWire === 'string' && declaredWire.length > 0 ? declaredWire : level
-          const probe = await send([{ role: probeRole, content: 'Reply OK' }], { reasoning_effort: wire })
+          let probe = await send([{ role: probeRole, content: 'Reply OK' }], { reasoning_effort: wire })
+          if (!probe.ok && ambiguous(probe)) {
+            probe = await send([{ role: probeRole, content: 'Reply OK' }], { reasoning_effort: wire })
+          }
+          return { level, probe }
+        }))
+        for (const { level, probe } of verdicts) {
           if (probe.ok) levels.push(level)
-          else unsupported.push(level)
+          else if (refused(probe)) unsupported.push(level)
+          else unknownLevels.push(level)
         }
       }
     }
   }
 
   // Combined write: capacity backfill + compat fix + validated effort dict
-  // in one models-array mutate, only when something actually changed.
+  // in one models-array mutate, only when something actually changed AND
+  // no level verdict was ambiguous (an unknown must never rewrite config).
   let applied = false
   let backfilled = 0
-  const nextDict: Record<string, unknown> | false | undefined = levels.length > 0
-    ? { off: null, ...Object.fromEntries(levels.map((level) => [level, level])) }
-    : (canWire && baselineError === undefined && !declaredNonReasoning ? false : undefined)
+  const effortVerdictClean = unknownLevels.length === 0
+  const nextDict: Record<string, unknown> | false | undefined = !effortVerdictClean
+    ? undefined
+    : levels.length > 0
+      ? { off: null, ...Object.fromEntries(levels.map((level) => [level, level])) }
+      : (canWire && baselineError === undefined && !declaredNonReasoning ? false : undefined)
   const dictChanged = nextDict !== undefined && JSON.stringify(nextDict) !== JSON.stringify(entry?.reasoningEfforts)
   const compatChanged = roleFix === 'fixed'
   if ((discovered.length > 0 || dictChanged || compatChanged) && models !== undefined) {
@@ -434,6 +463,7 @@ async function runFullProbe(
       roleFix,
       levels,
       unsupported,
+      unknown: unknownLevels,
       declaredNonReasoning,
       applied,
       backfilled,
@@ -453,6 +483,7 @@ async function runFullProbe(
       roleFix,
       levels,
       unsupported,
+      unknown: unknownLevels,
       declaredNonReasoning,
       applied,
       backfilled,

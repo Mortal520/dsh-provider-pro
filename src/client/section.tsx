@@ -200,6 +200,8 @@ interface HostProbeResult {
   /** Efforts probe: wire-accepted levels + refused ones + whether settings were rewritten. */
   levels?: string[]
   unsupported?: string[]
+  /** Ambiguous verdicts (timeout/429/5xx after retry) — never written back. */
+  unknown?: string[]
   applied?: boolean
   declaredNonReasoning?: boolean
   contextWindow?: number
@@ -321,6 +323,7 @@ async function sendProbeRequest(
     else if (answer.declaredNonReasoning === true) parts.push('efforts: non-reasoning')
     else parts.push('efforts: none')
     if (answer.unsupported !== undefined && answer.unsupported.length > 0) parts.push(`rejected: ${answer.unsupported.join('/')}`)
+    if (answer.unknown !== undefined && answer.unknown.length > 0) parts.push(`flaky: ${answer.unknown.join('/')}`)
     if (answer.imageProbe) parts.push('image: accepted')
     else if (answer.imageSupported === false) parts.push('image: rejected')
     if (answer.firstTokenMs !== undefined && answer.firstTokenMs !== null) parts.push(`first-token: ${answer.firstTokenMs}ms`)
