@@ -192,25 +192,86 @@ function reasonText(reason: unknown): string {
   return 'stop'
 }
 
+/* ----------------------------------------------------------- wire-level probes */
+
+/** One minimal OpenAI-completions wire POST result. */
+interface WireProbe {
+  status: number
+  ok: boolean
+  /** Truncated body text (error detail or empty on transport failure). */
+  body: string
+}
+
+/** Read-only credential resolution, mirroring how pi-ai resolves apiKeyEnv. */
+async function resolveProviderKey(ctx: Context, apiKeyEnv: unknown): Promise<string | undefined> {
+  if (typeof apiKeyEnv !== 'string' || apiKeyEnv.length === 0) return undefined
+  const credentials = (ctx as unknown as { get(key: string): unknown }).get('credentials') as
+    | { resolve(ref: string): Promise<{ value?: string } | undefined> }
+    | undefined
+  if (credentials === undefined || typeof credentials.resolve !== 'function') return undefined
+  try {
+    const hit = await credentials.resolve(apiKeyEnv)
+    const value = hit?.value
+    return typeof value === 'string' && value.length > 0 ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** POST one minimal chat-completions request; never throws. */
+async function wirePost(
+  baseURL: string,
+  apiKey: string | undefined,
+  body: Record<string, unknown>,
+): Promise<WireProbe> {
+  const url = `${baseURL.replace(/\/+$/, '')}/chat/completions`
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(apiKey === undefined ? {} : { authorization: `Bearer ${apiKey}` }),
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
+    })
+    const text = await response.text().catch(() => '')
+    return { status: response.status, ok: response.ok, body: text.slice(0, 400) }
+  } catch (error) {
+    return { status: 0, ok: false, body: error instanceof Error ? error.message : String(error) }
+  }
+}
+
 /**
- * Run one capability/deep probe through DSH's LLM runtime.
+ * Full per-model probe — one button, everything measured:
  *
- * - `mode: 'capabilities'` — zero-token, primary: `discoverModels`
- *   (GET /v1/models) for the provider's full listing. What the gateway
- *   declares is what you get — a relaying gateway may return an empty
- *   contextWindow/maxTokens, and that is reported as-is rather than
- *   guessed. Missing values are never fabricated.
- * - `mode: 'deep'` — fallback, token-cost: streams a minimal request carrying
- *   a 1×1 PNG (image admission exercised on the actual wire; text-only when
- *   no attachment store is mounted) and measures first-token latency, total
- *   time, and whether the upstream accepted the image.
+ * 1. context window/maxTokens — `discoverModels` (GET /v1/models), the
+ *    gateway's declared listing; missing values are backfilled.
+ * 2. message-role admission — pi-ai's OpenAI-completions compat defaults
+ *    `supportsDeveloperRole` to true, so a reasoning-capable model makes
+ *    pi-ai send its system prompt as `developer`, which some upstreams
+ *    (GLM relay, error 1214 角色信息不正确) refuse. One developer POST +
+ *    one system baseline settles it; a refusal with a passing `system`
+ *    writes `compat.supportsDeveloperRole: false`.
+ * 3. reasoning-effort levels — each of low/medium/high/max gets one minimal
+ *    request carrying the declared wire spelling; refused levels are
+ *    dropped and the validated `reasoningEfforts` dict is written back
+ *    (all levels refused → the entry becomes a non-reasoning model,
+ *    `reasoningEfforts: false`).
+ * 4. image admission — a real stream carrying a 1×1 PNG through the LLM
+ *    runtime measures first-token latency and whether the wire accepted
+ *    the image (run last, after any role fix, so it exercises the exact
+ *    configuration the chat will use).
+ *
+ * Everything lands in ONE models-array mutate (backfill + compat + efforts)
+ * before the stream, so results can never clobber each other.
  */
-async function runProbe(
+async function runFullProbe(
   ctx: Context,
   provider: string,
+  profile: Record<string, unknown> | undefined,
   baseURL: string | undefined,
   model: string,
-  mode: 'capabilities' | 'deep',
 ): Promise<Record<string, unknown>> {
   const startedAt = Date.now()
   const llm = (ctx as unknown as { get(key: string): unknown }).get('llm') as
@@ -220,12 +281,10 @@ async function runProbe(
       }
     | undefined
   if (llm === undefined || typeof llm.stream !== 'function') {
-    return { ok: false, mode, error: 'LLM runtime not available' }
+    return { ok: false, mode: 'full', error: 'LLM runtime not available' }
   }
 
-  // Discover the provider's models (contextWindow/maxTokens) so we can
-  // surface and, where missing, backfill capacity. The discovery handler
-  // resolves the API key from storage; provider + baseURL required.
+  // 1. Discovery — declared capacity listing.
   let discovered: Array<{ id: string; contextWindow?: number; maxTokens?: number }> = []
   let discoveryError: string | undefined
   if (typeof llm.discoverModels === 'function' && baseURL !== undefined) {
@@ -237,25 +296,93 @@ async function runProbe(
   }
   const thisModel = discovered.find((entry) => entry.id === model)
 
-  // Capabilities-only mode: no wire inference, no token cost. Report what
-  // the gateway declared; if discovery failed entirely, the client can fall
-  // back to a deep probe.
-  if (mode === 'capabilities') {
-    if (discoveryError !== undefined) {
-      return { ok: false, mode, totalMs: Date.now() - startedAt, error: discoveryError, discovery: { error: discoveryError } }
-    }
-    return {
-      ok: true,
-      mode,
-      totalMs: Date.now() - startedAt,
-      contextWindow: thisModel?.contextWindow,
-      maxTokens: thisModel?.maxTokens,
-      models: discovered,
+  const api = typeof profile?.api === 'string' ? profile.api : 'openai-completions'
+  const models = Array.isArray(profile?.models) ? profile?.models as Array<Record<string, unknown>> : undefined
+  const entry = models?.find((m) => m.id === model)
+
+  // 2+3. Wire checks (role admission, effort levels) — openai-completions only.
+  let roleFix: 'admitted' | 'fixed' | 'already' | 'failed' | 'skipped' = 'skipped'
+  let levels: string[] = []
+  let unsupported: string[] = []
+  let declaredNonReasoning = false
+  let baselineError: string | undefined
+  const canWire = baseURL !== undefined && api === 'openai-completions' && entry !== undefined
+  if (canWire) {
+    const apiKey = await resolveProviderKey(ctx, profile?.apiKeyEnv)
+    const send = (messages: unknown[], extra: Record<string, unknown> = {}): Promise<WireProbe> =>
+      wirePost(baseURL!, apiKey, { model, messages, max_tokens: 1, ...extra })
+    // Baseline: a plain user message must pass or the rest is meaningless.
+    const baseline = await send([{ role: 'user', content: 'Reply OK' }])
+    if (!baseline.ok) {
+      baselineError = baseline.status === 0 ? `unreachable: ${baseline.body}` : `baseline ${baseline.status}: ${baseline.body}`
+    } else {
+      // Role admission.
+      const compat = (entry!.compat ?? {}) as Record<string, unknown>
+      if (compat.supportsDeveloperRole === false) {
+        roleFix = 'already'
+      } else if ((await send([{ role: 'developer', content: 'Reply OK' }])).ok) {
+        roleFix = 'admitted'
+      } else {
+        const systemOk = (await send([{ role: 'system', content: 'Reply OK' }])).ok
+        roleFix = systemOk ? 'fixed' : 'failed'
+      }
+      // The role pi-ai will actually send: developer only when admitted.
+      const probeRole = roleFix === 'admitted' ? 'developer' : 'system'
+      // Effort levels — a declared non-reasoning model stays as-is.
+      if (entry!.reasoningEfforts === false) {
+        declaredNonReasoning = true
+      } else {
+        const declared = (entry!.reasoningEfforts !== undefined && typeof entry!.reasoningEfforts === 'object' && entry!.reasoningEfforts !== null)
+          ? entry!.reasoningEfforts as Record<string, unknown>
+          : undefined
+        for (const level of ['low', 'medium', 'high', 'max'] as const) {
+          const declaredWire = declared?.[level]
+          const wire = typeof declaredWire === 'string' && declaredWire.length > 0 ? declaredWire : level
+          const probe = await send([{ role: probeRole, content: 'Reply OK' }], { reasoning_effort: wire })
+          if (probe.ok) levels.push(level)
+          else unsupported.push(level)
+        }
+      }
     }
   }
 
-  // Deep mode: real stream probe (image admission + latency).
-  // Try to mint a durable image attachment; fall back to text-only.
+  // Combined write: capacity backfill + compat fix + validated effort dict
+  // in one models-array mutate, only when something actually changed.
+  let applied = false
+  let backfilled = 0
+  const nextDict: Record<string, unknown> | false | undefined = levels.length > 0
+    ? { off: null, ...Object.fromEntries(levels.map((level) => [level, level])) }
+    : (canWire && baselineError === undefined && !declaredNonReasoning ? false : undefined)
+  const dictChanged = nextDict !== undefined && JSON.stringify(nextDict) !== JSON.stringify(entry?.reasoningEfforts)
+  const compatChanged = roleFix === 'fixed'
+  if ((discovered.length > 0 || dictChanged || compatChanged) && models !== undefined) {
+    const next = models.map((m) => {
+      const disc = discovered.find((d) => d.id === m.id)
+      if (m.id !== model && disc === undefined) return m
+      const copy: Record<string, unknown> = { ...m }
+      if (disc !== undefined) {
+        if (copy.contextWindow === undefined && disc.contextWindow !== undefined) { copy.contextWindow = disc.contextWindow; backfilled++ }
+        if (copy.maxTokens === undefined && disc.maxTokens !== undefined) { copy.maxTokens = disc.maxTokens; backfilled++ }
+      }
+      if (m.id === model) {
+        if (dictChanged) copy.reasoningEfforts = nextDict
+        if (compatChanged) copy.compat = { ...((m.compat ?? {}) as Record<string, unknown>), supportsDeveloperRole: false }
+      }
+      return copy
+    })
+    const settings = settingsApi(ctx)
+    if (settings !== undefined) {
+      try {
+        await settings.mutate(NS, [{ op: 'set', path: ['providers', provider, 'models'], value: next }])
+        applied = true
+      } catch {
+        applied = false
+      }
+    }
+  }
+
+  // 4. Image admission + latency — real stream through the LLM runtime,
+  // after the role fix, so it exercises the exact post-fix configuration.
   let attachment: unknown
   let imageProbe = false
   try {
@@ -271,14 +398,12 @@ async function runProbe(
   } catch {
     // attachment store failure — text-only probe
   }
-
   const content = attachment !== undefined
     ? [
         { type: 'text', text: 'Reply with OK.' },
         { type: 'image', attachment },
       ]
     : [{ type: 'text', text: 'Reply with OK.' }]
-
   let firstTokenMs: number | null = null
   let finishReason = ''
   try {
@@ -297,31 +422,39 @@ async function runProbe(
       }
     }
     return {
-      ok: true,
-      mode,
-      firstTokenMs,
+      ok: baselineError === undefined && roleFix !== 'failed',
+      mode: 'full',
       totalMs: Date.now() - startedAt,
+      firstTokenMs,
       finishReason: finishReason || 'stop',
       imageProbe,
+      roleFix,
+      levels,
+      unsupported,
+      declaredNonReasoning,
+      applied,
+      backfilled,
       contextWindow: thisModel?.contextWindow,
       maxTokens: thisModel?.maxTokens,
-      discovery: discoveryError === undefined ? undefined : { error: discoveryError },
-      models: discoveryError === undefined ? discovered : undefined,
+      ...(baselineError !== undefined ? { error: baselineError } : {}),
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    const lower = message.toLowerCase()
-    const imageRejected = /image|media|vision|multimodal|unsupported.*(?:content|type|image)/i.test(lower)
+    const imageRejected = /image|media|vision|multimodal|unsupported.*(?:content|type|image)/i.test(message)
     return {
       ok: false,
-      mode,
+      mode: 'full',
       totalMs: Date.now() - startedAt,
       imageProbe,
       imageSupported: imageRejected ? false : undefined,
+      roleFix,
+      levels,
+      unsupported,
+      declaredNonReasoning,
+      applied,
+      backfilled,
       contextWindow: thisModel?.contextWindow,
       maxTokens: thisModel?.maxTokens,
-      discovery: discoveryError === undefined ? undefined : { error: discoveryError },
-      models: discoveryError === undefined ? discovered : undefined,
       error: message,
     }
   }
@@ -424,44 +557,22 @@ export function apply(ctx: Context) {
         const section = readSection(ctx) as Record<string, unknown> | undefined
         const req = section?.[PROBE_REQ_FLAG]
         if (req === undefined || req === null || typeof req !== 'object') return
-        const { id, provider, model, mode } = req as { id?: unknown; provider?: unknown; model?: unknown; mode?: unknown }
+        const { id, provider, model } = req as { id?: unknown; provider?: unknown; model?: unknown; mode?: unknown }
         if (typeof id !== 'string' || typeof provider !== 'string' || typeof model !== 'string') return
         if (id === lastProbeId) return
         lastProbeId = id
         probing = true
-        const providers = (section?.providers ?? {}) as Record<string, { baseURL?: unknown; models?: Array<{ id?: unknown; contextWindow?: unknown; maxTokens?: unknown }> } | undefined>
+        const providers = (section?.providers ?? {}) as Record<string, Record<string, unknown> | undefined>
         const profile = providers[provider]
         const baseURL = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
-        const probeMode: 'capabilities' | 'deep' = mode === 'deep' ? 'deep' : 'capabilities'
         try {
-          const result = await runProbe(ctx, provider, baseURL, model, probeMode)
-          // Capacity backfill: for every declared model that lacks
-          // contextWindow/maxTokens, write the discovered value. Only fills
-          // missing fields — hand-set values are never overwritten. Applies
-          // only when discovery returned a real listing.
-          const discovered = Array.isArray(result.models) ? result.models as Array<{ id: string; contextWindow?: number; maxTokens?: number }> : []
-          const models = profile?.models
-          let backfilled = 0
-          if (discovered.length > 0 && Array.isArray(models)) {
-            let changed = false
-            const next = models.map((entry) => {
-              const disc = discovered.find((d) => d.id === entry.id)
-              if (disc === undefined) return entry
-              const copy = { ...entry }
-              if (entry.contextWindow === undefined && disc.contextWindow !== undefined) { copy.contextWindow = disc.contextWindow; changed = true }
-              if (entry.maxTokens === undefined && disc.maxTokens !== undefined) { copy.maxTokens = disc.maxTokens; changed = true }
-              return copy
-            })
-            const backfillApi = settingsApi(ctx)
-            if (changed && backfillApi !== undefined) {
-              await backfillApi.mutate(NS, [{ op: 'set', path: ['providers', provider, 'models'], value: next }])
-              backfilled = next.reduce((n, e, i) => n + (e.contextWindow !== models[i]?.contextWindow || e.maxTokens !== models[i]?.maxTokens ? 1 : 0), 0)
-            }
-          }
+          // One button, one full probe: discovery backfill + role admission
+          // + effort levels + image stream, all write-backs inside runFullProbe.
+          const result = await runFullProbe(ctx, provider, profile, baseURL, model)
           const settings = settingsApi(ctx)
           if (settings === undefined) return
           await settings.mutate(NS, [
-            { op: 'set', path: [PROBE_RESULT_FLAG], value: { ...result, id, provider, model, backfilled } },
+            { op: 'set', path: [PROBE_RESULT_FLAG], value: { ...result, id, provider, model } },
             { op: 'unset', path: [PROBE_REQ_FLAG] },
           ])
         } catch {

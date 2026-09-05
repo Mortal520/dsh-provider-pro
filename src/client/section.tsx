@@ -189,12 +189,19 @@ interface HostProbeResult {
   provider: string
   model: string
   ok: boolean
-  mode?: 'capabilities' | 'deep'
+  mode?: 'full'
   firstTokenMs?: number | null
   totalMs?: number
   finishReason?: string
   imageProbe?: boolean
   imageSupported?: boolean
+  /** developer-role admission: admitted = wire accepts developer, fixed = compat written, already = already off. */
+  roleFix?: 'admitted' | 'fixed' | 'already' | 'failed'
+  /** Efforts probe: wire-accepted levels + refused ones + whether settings were rewritten. */
+  levels?: string[]
+  unsupported?: string[]
+  applied?: boolean
+  declaredNonReasoning?: boolean
   contextWindow?: number
   maxTokens?: number
   backfilled?: number
@@ -219,7 +226,7 @@ async function sendProbeRequest(
   provider: string,
   model: string,
   events: SectionEvents,
-  mode: 'capabilities' | 'deep',
+  mode: 'full',
 ): Promise<ProbeResult> {
   const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   // Freshest revision: the write advances the document, and probe-all walks
@@ -281,41 +288,50 @@ async function sendProbeRequest(
   }
 
   if (!answer.ok) {
+    const base = answer.error ?? (answer.imageSupported === false ? 'model does not accept image input' : 'probe failed')
+    // Role-repair note: the deep probe hit a role rejection and the host
+    // verified + repaired (or could not repair) the developer-role compat.
+    const note = answer.roleFix === 'fixed'
+      ? ' (role-fix: developer rejected → compat written, retry)'
+      : answer.roleFix === 'failed'
+        ? ' (role-fix attempted but write failed)'
+        : undefined
     return {
       status: 'failure', provider, model, totalMs: answer.totalMs,
       failure: {
-        code: answer.mode === 'capabilities' && answer.error !== undefined
-          ? 'CAPABILITIES_FAIL'
-          : (answer.imageSupported === false ? 'IMAGE_UNSUPPORTED' : 'PROBE_FAIL'),
-        message: answer.error ?? (answer.imageSupported === false ? 'model does not accept image input' : 'probe failed'),
+        code: answer.imageSupported === false ? 'IMAGE_UNSUPPORTED' : 'PROBE_FAIL',
+        message: note !== undefined ? base + note : base,
       },
     }
   }
-  const caps: string[] = []
-  if (answer.contextWindow !== undefined) caps.push(`ctx: ${answer.contextWindow}`)
-  if (answer.maxTokens !== undefined) caps.push(`max: ${answer.maxTokens}`)
-  if (answer.mode === 'capabilities') {
-    // Zero-cost: gateway-declared capacity.
-    if (caps.length === 0) caps.push('no capacity info')
-    if (answer.backfilled !== undefined && answer.backfilled > 0) caps.push(`backfilled: ${answer.backfilled}`)
+  if (answer.mode === 'full') {
+    // One-button probe: capacity + role admission + effort levels + image.
+    const parts: string[] = []
+    if (answer.contextWindow !== undefined) parts.push(`ctx: ${answer.contextWindow}`)
+    if (answer.maxTokens !== undefined) parts.push(`max: ${answer.maxTokens}`)
+    if (answer.roleFix === 'admitted') parts.push('role: developer')
+    else if (answer.roleFix === 'already') parts.push('role: system')
+    else if (answer.roleFix === 'fixed') parts.push('role: system (fixed)')
+    else if (answer.roleFix === 'failed') parts.push('role: unresolved')
+    if (answer.levels !== undefined && answer.levels.length > 0) parts.push(`efforts: ${answer.levels.join('/')}`)
+    else if (answer.declaredNonReasoning === true) parts.push('efforts: non-reasoning')
+    else parts.push('efforts: none')
+    if (answer.unsupported !== undefined && answer.unsupported.length > 0) parts.push(`rejected: ${answer.unsupported.join('/')}`)
+    if (answer.imageProbe) parts.push('image: accepted')
+    else if (answer.imageSupported === false) parts.push('image: rejected')
+    if (answer.firstTokenMs !== undefined && answer.firstTokenMs !== null) parts.push(`first-token: ${answer.firstTokenMs}ms`)
+    if (answer.applied) parts.push('written')
+    if (answer.backfilled !== undefined && answer.backfilled > 0) parts.push(`backfilled: ${answer.backfilled}`)
     return {
       status: 'success', provider, model, totalMs: answer.totalMs,
       firstTokenMs: answer.firstTokenMs,
-      finishReason: caps.join(' · '),
+      finishReason: parts.join(' · '),
       usage: {},
     }
   }
-  // Deep probe: latency + image acceptance on top of capacity.
-  caps.push(`first-token: ${answer.firstTokenMs ?? 'n/a'}ms`)
-  if (answer.totalMs !== undefined) caps.push(`total: ${answer.totalMs}ms`)
-  caps.push(`reason: ${answer.finishReason ?? 'stop'}`)
-  if (answer.imageProbe) caps.push('image: accepted')
-  if (answer.backfilled !== undefined && answer.backfilled > 0) caps.push(`backfilled: ${answer.backfilled}`)
   return {
-    status: 'success', provider, model, totalMs: answer.totalMs,
-    firstTokenMs: answer.firstTokenMs,
-    finishReason: caps.join(' · '),
-    usage: {},
+    status: 'failure', provider, model,
+    failure: { code: 'PROBE_FAIL', message: `unknown probe mode: ${String(answer.mode)}` },
   }
 }
 
@@ -377,11 +393,11 @@ function ModelRow(props: {
     if (response.ok) onMutated()
   }
 
-  const runProbe = async (mode: 'capabilities' | 'deep') => {
+  const runProbe = async () => {
     setProbeBusy(true)
     setProbeResult(undefined)
     try {
-      setProbeResult(await sendProbeRequest(api, route, model.id, events, mode))
+      setProbeResult(await sendProbeRequest(api, route, model.id, events, 'full'))
     } catch (error: unknown) {
       const err = error as { message?: string }
       setProbeResult({ status: 'failure', provider: route, model: model.id, totalMs: 0, failure: { code: 'ERROR', message: err.message ?? String(error) } })
@@ -413,11 +429,8 @@ function ModelRow(props: {
         />
         <span className="dpp-model-cb-label">{t('imageInput')}</span>
       </label>
-      <button type="button" className="dpp-probe-btn" disabled={probeBusy} onClick={() => void runProbe('capabilities')}>
-        {probeBusy ? t('probing') : t('capabilities')}
-      </button>
-      <button type="button" className="dpp-probe-btn" disabled={probeBusy} onClick={() => void runProbe('deep')}>
-        {probeBusy ? t('probing') : t('deepProbe')}
+      <button type="button" className="dpp-probe-btn" disabled={probeBusy} title={t('probeHint')} onClick={() => void runProbe()}>
+        {probeBusy ? t('probing') : t('probe')}
       </button>
       {displayResult ? (
         <span className={'dpp-probe-result ' + (displayResult.status === 'success' ? 'dpp-probe-ok' : 'dpp-probe-fail')}>
@@ -484,11 +497,10 @@ function ProviderCard(props: {
     setProbeAllBusy(true)
     setProbeAllResults(new Map())
     const results = new Map<string, ProbeResult>()
-    // Primary: zero-cost capability discovery for every model (§/v1/models).
-    // If discovery is unavailable (relay gateway), a model's deep probe can
-    // still be run individually — that stays the costful fallback.
+    // Same full probe as the per-model button, walked across the roster:
+    // each result also feeds the provider-level alive badge.
     for (const model of profile.models) {
-      results.set(model.id, await sendProbeRequest(api, route, model.id, events, 'capabilities'))
+      results.set(model.id, await sendProbeRequest(api, route, model.id, events, 'full'))
       setProbeAllResults(new Map(results))
     }
     setProbeAllBusy(false)

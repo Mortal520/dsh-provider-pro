@@ -2,6 +2,45 @@
 
 All notable changes to dsh-provider-pro.
 
+## [0.5.0] - 2026-09-05
+
+### Added
+- **One-button full model probe** (replaces the 0.4.0 capabilities/deep
+  split): a single "Probe" button per model row measures everything in
+  one pass —
+  1. context window/maxTokens via `discoverModels` (GET /v1/models),
+     missing values backfilled into the model entry;
+  2. **message-role admission** — pi-ai's OpenAI-completions compat
+     defaults `supportsDeveloperRole` to true, so a reasoning-capable
+     model makes pi-ai send its system prompt as OpenAI's `developer`
+     role, which some upstreams (GLM behind a relay, error 1214
+     "角色信息不正确") refuse. One minimal `developer` POST + one
+     `system` baseline settles it; a refusal with a passing `system`
+     auto-writes `compat.supportsDeveloperRole: false` so pi-ai falls
+     back to `system`;
+  3. **reasoning-effort levels, measured as real** — each of
+     low/medium/high/max gets one `max_tokens: 1` request carrying the
+     declared wire spelling (`reasoning_effort`); refused levels are
+     dropped and the validated `reasoningEfforts` dict is written back.
+     All levels refused → the entry becomes a genuine non-reasoning
+     model (`reasoningEfforts: false`), so the chat picker stops
+     offering controls the wire rejects;
+  4. **image admission + latency** — a real stream carrying a 1×1 PNG
+     through the LLM runtime, run last so it exercises the exact
+     post-fix configuration the chat will use.
+  All settings write-backs (backfill + compat + efforts) land in ONE
+  models-array mutate before the stream, so results can never clobber
+  each other. Wire checks run only for `openai-completions` routes and
+  skip silently otherwise.
+- Provider-wide "Probe all" now walks every model through the same full
+  probe (it also feeds the alive badges). Each result line shows
+  `ctx · max · role · efforts/rejected · image · first-token ·
+  written/backfilled`.
+
+### Changed
+- Probe summary formatting consolidated; removed the separate
+  "Capabilities"/"Deep probe" buttons and their locale keys.
+
 ## [0.4.0] - 2026-09-02
 
 ### Added

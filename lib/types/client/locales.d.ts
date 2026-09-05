@@ -21,8 +21,8 @@ export declare const zh: {
     readonly models: '模型';
     readonly imageInput: '支持图片输入';
     readonly probing: '探测中…';
-    readonly capabilities: '能力获取';
-    readonly deepProbe: '深度探测';
+    readonly probe: '探测';
+    readonly probeHint: '一次实测：上下文窗口（网关声明，缺失则回填）+ developer 角色兼容（被拒自动改用 system）+ 推理等级逐档验证（据实写入）+ 图片输入（真实流式请求）。';
     readonly probeAll: '一键探测';
 };
 export declare const en: {
@@ -47,8 +47,8 @@ export declare const en: {
     readonly models: 'Models';
     readonly imageInput: 'Support image input';
     readonly probing: 'Probing…';
-    readonly capabilities: 'Capabilities';
-    readonly deepProbe: 'Deep probe';
+    readonly probe: 'Probe';
+    readonly probeHint: 'One pass measures: context window (gateway-declared, backfilled when missing) + developer-role compat (auto-falls back to system when refused) + per-level reasoning-effort validation (written as measured) + image input (real streaming request).';
     readonly probeAll: 'Probe all';
 };
 export type LocaleKey = keyof typeof zh | keyof typeof en;

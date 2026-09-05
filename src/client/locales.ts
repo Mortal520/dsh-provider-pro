@@ -21,8 +21,8 @@ export const zh = {
   models: '模型',
   imageInput: '支持图片输入',
   probing: '探测中…',
-  capabilities: '能力获取',
-  deepProbe: '深度探测',
+  probe: '探测',
+  probeHint: '一次实测：上下文窗口（网关声明，缺失则回填）+ developer 角色兼容（被拒自动改用 system）+ 推理等级逐档验证（据实写入）+ 图片输入（真实流式请求）。',
   probeAll: '一键探测',
 } as const
 
@@ -48,8 +48,8 @@ export const en = {
   models: 'Models',
   imageInput: 'Support image input',
   probing: 'Probing\u2026',
-  capabilities: 'Capabilities',
-  deepProbe: 'Deep probe',
+  probe: 'Probe',
+  probeHint: 'One pass measures: context window (gateway-declared, backfilled when missing) + developer-role compat (auto-falls back to system when refused) + per-level reasoning-effort validation (written as measured) + image input (real streaming request).',
   probeAll: 'Probe all',
 } as const
 
