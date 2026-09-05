@@ -271,7 +271,11 @@ async function sendProbeRequest(
     disposer = events.on(() => {
       void readSlot().then(done)
     })
-    timer = setTimeout(() => done(undefined), 12000)
+    // The full probe issues up to 7 small wire requests (discovery, role
+    // pair, four levels) plus the image stream — a slow relay can take
+    // 20-30s, so the wait cap must exceed the host's worst-case sum
+    // (4 × 10s level timeouts alone).
+    timer = setTimeout(() => done(undefined), 60000)
     // One immediate read in case the result already landed before we attached.
     void readSlot().then((value) => { if (value !== undefined) done(value) })
   })
