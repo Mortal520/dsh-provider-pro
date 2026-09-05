@@ -195,11 +195,11 @@ function reasonText(reason: unknown): string {
 /**
  * Run one capability/deep probe through DSH's LLM runtime.
  *
- * - `mode: 'capabilities'` — zero-token: calls `discoverModels`
- *   (GET /v1/models) and returns each model's `contextWindow`/`maxTokens`.
- *   This is the primary, cost-free source for model capacity. Through a
- *   relaying gateway the listing may be generic — treat it as a declared
- *   reference, not measured truth.
+ * - `mode: 'capabilities'` — zero-token, primary: `discoverModels`
+ *   (GET /v1/models) for the provider's full listing. What the gateway
+ *   declares is what you get — a relaying gateway may return an empty
+ *   contextWindow/maxTokens, and that is reported as-is rather than
+ *   guessed. Missing values are never fabricated.
  * - `mode: 'deep'` — fallback, token-cost: streams a minimal request carrying
  *   a 1×1 PNG (image admission exercised on the actual wire; text-only when
  *   no attachment store is mounted) and measures first-token latency, total
@@ -225,7 +225,7 @@ async function runProbe(
 
   // Discover the provider's models (contextWindow/maxTokens) so we can
   // surface and, where missing, backfill capacity. The discovery handler
-  // resolves the API key from storage; only provider + baseURL are required.
+  // resolves the API key from storage; provider + baseURL required.
   let discovered: Array<{ id: string; contextWindow?: number; maxTokens?: number }> = []
   let discoveryError: string | undefined
   if (typeof llm.discoverModels === 'function' && baseURL !== undefined) {
@@ -237,8 +237,9 @@ async function runProbe(
   }
   const thisModel = discovered.find((entry) => entry.id === model)
 
-  // Capabilities-only mode: no wire inference, no token cost. If discovery
-  // failed entirely, report it so the client can fall back to a deep probe.
+  // Capabilities-only mode: no wire inference, no token cost. Report what
+  // the gateway declared; if discovery failed entirely, the client can fall
+  // back to a deep probe.
   if (mode === 'capabilities') {
     if (discoveryError !== undefined) {
       return { ok: false, mode, totalMs: Date.now() - startedAt, error: discoveryError, discovery: { error: discoveryError } }

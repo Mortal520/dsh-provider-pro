@@ -289,7 +289,7 @@ async function sendProbeRequest(
   if (answer.contextWindow !== undefined) caps.push(`ctx: ${answer.contextWindow}`)
   if (answer.maxTokens !== undefined) caps.push(`max: ${answer.maxTokens}`)
   if (answer.mode === 'capabilities') {
-    // Zero-cost: just the declared/gateway-reported capacity.
+    // Zero-cost: gateway-declared capacity.
     if (caps.length === 0) caps.push('no capacity info')
     if (answer.backfilled !== undefined && answer.backfilled > 0) caps.push(`backfilled: ${answer.backfilled}`)
     return {
