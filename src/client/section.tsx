@@ -189,7 +189,7 @@ interface HostProbeResult {
   provider: string
   model: string
   ok: boolean
-  mode?: 'full'
+  mode?: 'full' | 'capabilities' | 'deep'
   firstTokenMs?: number | null
   totalMs?: number
   finishReason?: string
@@ -326,6 +326,20 @@ async function sendProbeRequest(
       status: 'success', provider, model, totalMs: answer.totalMs,
       firstTokenMs: answer.firstTokenMs,
       finishReason: parts.join(' · '),
+      usage: {},
+    }
+  }
+  if (answer.mode === 'capabilities') {
+    // Legacy host (pre-0.5.0) answered a capabilities probe: capacity only.
+    const caps: string[] = []
+    if (answer.contextWindow !== undefined) caps.push(`ctx: ${answer.contextWindow}`)
+    if (answer.maxTokens !== undefined) caps.push(`max: ${answer.maxTokens}`)
+    if (caps.length === 0) caps.push('no capacity info')
+    if (answer.backfilled !== undefined && answer.backfilled > 0) caps.push(`backfilled: ${answer.backfilled}`)
+    return {
+      status: 'success', provider, model, totalMs: answer.totalMs,
+      firstTokenMs: answer.firstTokenMs,
+      finishReason: caps.join(' · '),
       usage: {},
     }
   }
