@@ -42,9 +42,32 @@ All notable changes to dsh-provider-pro.
   normally accepts. The default five-level dictionary is instead
   provided by the `fillEfforts` auto-fill pass, which the probe never
   overwrites.
+- **Probe efficiency + verdict coverage** (live-fire tuned):
+  - discovery (GET /v1/models) is cached per baseURL for 60s — a
+    "probe all" pass over N models no longer re-fetches the same
+    listing N times;
+  - when the wire baseline already proves the model unreachable or
+    hard-refused, the 30s image stream is skipped (the upstream is
+    dead; a second, slower error adds nothing) — hung upstream models
+    now cost ~10s instead of ~50s;
+  - a timeout abort on the baseline is not retried (an upstream that
+    hung 10s will not answer in the next 10); fast transport failures
+    still get one retry;
+  - developer-role admission treats a gateway-wrapped 5xx as a
+    candidate refusal when `system` passes (measured: the live gateway
+    wraps upstream 4xx refusals in 500s), so GLM-style models get the
+    compat fix on the probe instead of failing in chat;
+  - any streamed chunk (reasoning delta included) is first-token
+    evidence — reasoning models that burn their token cap on thinking
+    now get an image-acceptance verdict instead of an inconclusive
+    stall; a clean `finish` counts too, an error/aborted finish does
+    not;
+  - the image stream carries a 12s first-token gate inside the 30s
+    budget: tokens flowing → burn the budget; nothing flowing → fail
+    fast with "no first token within 12s".
 - Probe summary formatting consolidated; removed the separate
   "Capabilities"/"Deep probe" buttons and their locale keys.
-- A stream that yields no first token within the 30s budget is an
+- A stream that yields no first token within its budget is an
   explicit probe failure (the model did not answer) instead of a
   success with a budget note.
 - The provider badge reports "cooldown" only when EVERY failed model

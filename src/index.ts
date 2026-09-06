@@ -195,6 +195,9 @@ function reasonText(reason: unknown): string {
 
 /* ----------------------------------------------------------- wire-level probes */
 
+/** Discovery cache — one GET /v1/models per baseURL per 60s window. */
+const discoveryCache = new Map<string, { at: number; list: Array<{ id: string; contextWindow?: number; maxTokens?: number }> }>()
+
 /** One minimal OpenAI-completions wire POST result. */
 interface WireProbe {
   status: number
@@ -284,17 +287,26 @@ async function runFullProbe(
   }
 
   // 1. Discovery — declared capacity listing. Raced with a 10s cap so a
-  // hanging listing request cannot extend the probe without bound.
+  // hanging listing request cannot extend the probe without bound, and
+  // cached per baseURL for 60s: a "probe all" pass over N models would
+  // otherwise re-fetch the same listing N times in quick succession.
   let discovered: Array<{ id: string; contextWindow?: number; maxTokens?: number }> = []
   let discoveryError: string | undefined
   if (typeof llm.discoverModels === 'function' && baseURL !== undefined) {
-    try {
-      discovered = await Promise.race([
-        llm.discoverModels('llm-pi-ai', { provider, baseURL }),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('discovery timed out (10s)')), 10000)),
-      ])
-    } catch (error) {
-      discoveryError = error instanceof Error ? error.message : String(error)
+    const cacheKey = baseURL
+    const cached = discoveryCache.get(cacheKey)
+    if (cached !== undefined && Date.now() - cached.at < 60000) {
+      discovered = cached.list
+    } else {
+      try {
+        discovered = await Promise.race([
+          llm.discoverModels('llm-pi-ai', { provider, baseURL }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('discovery timed out (10s)')), 10000)),
+        ])
+        discoveryCache.set(cacheKey, { at: Date.now(), list: discovered })
+      } catch (error) {
+        discoveryError = error instanceof Error ? error.message : String(error)
+      }
     }
   }
   const thisModel = discovered.find((entry) => entry.id === model)
@@ -332,9 +344,12 @@ async function runFullProbe(
     // Baseline: a plain user message must pass or the rest is meaningless.
     // One retry for an ambiguous failure (transient relay stall) — but a
     // credential-pool cooldown has a reset measured in hours; retrying
-    // seconds later is pointless.
+    // seconds later is pointless. A TIMEOUT abort is also not retried:
+    // an upstream that hung for 10s will not answer in the next 10, and
+    // the retry would double the cost of every hung model.
     let baseline = await send('user')
-    if (!baseline.ok && ambiguous(baseline) && !baseline.body.includes('model_cooldown')) {
+    const timedOut = baseline.status === 0 && /aborted|timed?\s*out/i.test(baseline.body)
+    if (!baseline.ok && ambiguous(baseline) && !timedOut && !baseline.body.includes('model_cooldown')) {
       baseline = await send('user')
     }
     if (!baseline.ok) {
@@ -344,7 +359,12 @@ async function runFullProbe(
           : 'gateway did not respond within 10s (retried once) — relay hung or gateway down')
         : `baseline ${baseline.status}: ${baseline.body}`
     } else {
-      // Role admission — only a real 4xx refusal counts against developer.
+      // Role admission. A 4xx refusal counts against developer directly;
+      // a 5xx is ALSO treated as a candidate refusal when `system` passes —
+      // measured on the live gateway: it wraps upstream 4xx refusals
+      // (GLM 1214 角色信息不正确) in 500s. The system cross-check keeps
+      // genuine upstream outages from writing a bogus compat fix (system
+      // would fail too, → 'failed', nothing written).
       const compat = (entry!.compat ?? {}) as Record<string, unknown>
       if (compat.supportsDeveloperRole === false) {
         roleFix = 'already'
@@ -352,11 +372,11 @@ async function runFullProbe(
         const dev = await send('developer')
         if (dev.ok) {
           roleFix = 'admitted'
-        } else if (dev.status >= 400 && dev.status < 500 && dev.status !== 429) {
+        } else if (dev.status >= 400 && dev.status !== 429) {
           const sys = await send('system')
           roleFix = sys.ok ? 'fixed' : 'failed'
         }
-        // else: ambiguous developer result — leave the compat untouched.
+        // else: ambiguous developer result (timeout/0) — leave the compat untouched.
       }
     }
   }
@@ -446,28 +466,36 @@ async function runFullProbe(
   let imageVerdict: 'accepted' | 'rejected' | undefined
   let streamError: string | undefined
   let streamTimedOut = false
-  try {
-    const stream = llm.stream({
-      provider,
-      model,
-      messages: [{ role: 'user', content }],
-      maxTokens: 8,
-    }) as AsyncIterable<ProbeChunk>
-    // 30s budget, enforced per-chunk with a race: a relay that stalls
-    // BEFORE the first token must not block the probe forever (an
-    // unbounded stream let the whole probe outrun the client wait cap —
-    // the user saw TIMEOUT followed by a late checkbox sync from exactly
-    // this). Budget expiry with a first token seen = the wire accepted
-    // the request (verdict stands, partial response); expiry with
-    // NOTHING seen = the model never answered — an explicit probe
-    // failure, no verdict, no declaration write.
+  // Efficiency gate: when the wire baseline already established the model
+  // is unreachable or hard-refused, a 30s stream can only add a second,
+  // slower error on top of the first. Skip the stream entirely — the
+  // failure line stays the precise baseline verdict.
+  const wireDead = baselineError !== undefined
+  if (!wireDead) {
+    try {
+      const stream = llm.stream({
+        provider,
+        model,
+        messages: [{ role: 'user', content }],
+        maxTokens: 8,
+      }) as AsyncIterable<ProbeChunk>
+    // 30s overall budget, but a 12s first-token gate: a healthy relay
+    // produces SOMETHING (reasoning delta included) in 2-3s; a model that
+    // has sent nothing for 12s is hung upstream — burn the remaining
+    // budget only when tokens are actually flowing.
     const deadline = Date.now() + 30000
+    const firstTokenGate = Date.now() + 12000
     const iterator = (stream as AsyncIterableIterator<ProbeChunk>)[Symbol.asyncIterator]()
     while (true) {
-      const remaining = deadline - Date.now()
+      const now = Date.now()
+      const gateLeft = firstTokenMs === null ? firstTokenGate - now : Infinity
+      const budgetLeft = deadline - now
+      const remaining = Math.min(gateLeft, budgetLeft)
       if (remaining <= 0) {
         if (firstTokenMs === null) streamTimedOut = true
-        finishReason = finishReason || 'probe budget (30s) exceeded'
+        finishReason = finishReason || (firstTokenMs === null
+          ? 'no first token within 12s — upstream hung'
+          : 'probe budget (30s) exceeded')
         break
       }
       const next = await new Promise<IteratorResult<ProbeChunk> | undefined>((resolve, reject) => {
@@ -479,17 +507,29 @@ async function runFullProbe(
       })
       if (next === undefined) {
         if (firstTokenMs === null) streamTimedOut = true
-        finishReason = finishReason || 'probe budget (30s) exceeded'
+        finishReason = finishReason || (firstTokenMs === null
+          ? 'no first token within 12s — upstream hung'
+          : 'probe budget (30s) exceeded')
         break
       }
       if (next.done === true) break
       const chunk = next.value
-      if (firstTokenMs === null && chunk.type === 'text-delta') {
-        firstTokenMs = Date.now() - startedAt
-      }
       if (chunk.type === 'finish') {
-        finishReason = reasonText((chunk as { reason?: unknown }).reason)
+        const reason = reasonText((chunk as { reason?: unknown }).reason)
+        finishReason = reason
+        // A clean finish is itself acceptance evidence: reasoning models can
+        // burn their whole token cap on thinking and emit ZERO text deltas,
+        // yet the wire accepted the request (and the image) — finish(length)
+        // proves the upstream consumed it. An error/aborted finish is not.
+        if (firstTokenMs === null && !/^(error|aborted)/.test(reason)) {
+          firstTokenMs = Date.now() - startedAt
+        }
         break
+      }
+      // Any streamed chunk (text delta, reasoning delta, tool call, role
+      // preamble) proves the wire accepted the request — not just text.
+      if (firstTokenMs === null && chunk.type !== 'error') {
+        firstTokenMs = Date.now() - startedAt
       }
     }
     void iterator.return?.()
@@ -500,6 +540,7 @@ async function runFullProbe(
       imageVerdict = 'rejected'
     }
   }
+  } // end if (!wireDead)
 
   // 5. Declaration sync — the image-input checkbox is a declaration DSH
   // acts on, so a measured acceptance checks it and a measured rejection
@@ -554,7 +595,9 @@ async function runFullProbe(
 
   // A stream error or a stall with no first token is a probe failure —
   // the model did not answer, which is exactly what the alive dot reports.
-  if (streamError !== undefined || streamTimedOut) {
+  // With the wire already dead, the baseline error IS the verdict (the
+  // stream was skipped) — same return shape, same precision.
+  if (streamError !== undefined || streamTimedOut || baselineError !== undefined) {
     return {
       ok: false,
       mode: 'full',
@@ -570,7 +613,9 @@ async function runFullProbe(
       contextWindow: thisModel?.contextWindow,
       maxTokens: thisModel?.maxTokens,
       error: streamError
-        ?? 'image stream stalled: no first token within the 30s budget (model overloaded or relay hung)',
+        ?? (streamTimedOut
+          ? 'image stream stalled: no first token within 12s (upstream hung)'
+          : baselineError),
     }
   }
   return {
