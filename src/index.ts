@@ -247,7 +247,7 @@ async function wirePost(
 }
 
 /**
- * Full per-model probe — one button, everything measured:
+ * Full per-model probe — one button, three measurements:
  *
  * 1. context window/maxTokens — `discoverModels` (GET /v1/models), the
  *    gateway's declared listing; missing values are backfilled.
@@ -257,18 +257,13 @@ async function wirePost(
  *    (GLM relay, error 1214 角色信息不正确) refuse. One developer POST +
  *    one system baseline settles it; a refusal with a passing `system`
  *    writes `compat.supportsDeveloperRole: false`.
- * 3. reasoning-effort levels — each of low/medium/high/max gets one minimal
- *    request carrying the declared wire spelling; refused levels are
- *    dropped and the validated `reasoningEfforts` dict is written back
- *    (all levels refused → the entry becomes a non-reasoning model,
- *    `reasoningEfforts: false`).
- * 4. image admission — a real stream carrying a 1×1 PNG through the LLM
+ * 3. image admission — a real stream carrying a 1×1 PNG through the LLM
  *    runtime measures first-token latency and whether the wire accepted
  *    the image (run last, after any role fix, so it exercises the exact
  *    configuration the chat will use).
  *
- * Everything lands in ONE models-array mutate (backfill + compat + efforts)
- * before the stream, so results can never clobber each other.
+ * Everything lands in ONE models-array mutate (backfill + compat) before
+ * the stream, so results can never clobber each other.
  */
 async function runFullProbe(
   ctx: Context,
@@ -308,18 +303,13 @@ async function runFullProbe(
   const models = Array.isArray(profile?.models) ? profile?.models as Array<Record<string, unknown>> : undefined
   const entry = models?.find((m) => m.id === model)
 
-  // 2+3. Wire checks (role admission, effort levels) — openai-completions only.
+  // 2. Wire check (role admission) — openai-completions only.
   let roleFix: 'admitted' | 'fixed' | 'already' | 'failed' | 'skipped' = 'skipped'
-  let levels: string[] = []
-  let unsupported: string[] = []
-  let unknownLevels: string[] = []
-  let declaredNonReasoning = false
   let baselineError: string | undefined
   const canWire = baseURL !== undefined && api === 'openai-completions' && entry !== undefined
   // A genuinely refused request is a 4xx other than 429. Timeouts (0),
   // rate limits, and upstream 5xx are AMBIGUOUS — never evidence of
-  // rejection; they get one retry, then stay "unknown".
-  const refused = (probe: WireProbe): boolean => probe.status >= 400 && probe.status < 500 && probe.status !== 429
+  // rejection; they get one retry.
   const ambiguous = (probe: WireProbe): boolean => probe.status === 0 || probe.status === 429 || probe.status >= 500
   if (canWire) {
     const apiKey = await resolveProviderKey(ctx, profile?.apiKeyEnv)
@@ -328,7 +318,7 @@ async function runFullProbe(
     // system/user/developer) are refused by some relays with a misleading
     // "messages 参数非法" — measured on a GLM relay: user+system passes
     // where single-message shapes fail or misreport.
-    const send = (role: string, extra: Record<string, unknown> = {}): Promise<WireProbe> =>
+    const send = (role: string): Promise<WireProbe> =>
       wirePost(baseURL!, apiKey, {
         model,
         messages: [
@@ -338,7 +328,6 @@ async function runFullProbe(
         // 4, not 1: GLM-style relays reject max_tokens <= 2 outright
         // ("max_tokens must be greater than 2").
         max_tokens: 4,
-        ...extra,
       })
     // Baseline: a plain user message must pass or the rest is meaningless.
     // One retry for an ambiguous failure (transient relay stall) — but a
@@ -359,55 +348,21 @@ async function runFullProbe(
         const dev = await send('developer')
         if (dev.ok) {
           roleFix = 'admitted'
-        } else if (refused(dev)) {
+        } else if (dev.status >= 400 && dev.status < 500 && dev.status !== 429) {
           const sys = await send('system')
           roleFix = sys.ok ? 'fixed' : 'failed'
         }
         // else: ambiguous developer result — leave the compat untouched.
       }
-      // The role pi-ai will actually send: developer only when admitted.
-      const probeRole = roleFix === 'admitted' ? 'developer' : 'system'
-      // Effort levels — a declared non-reasoning model stays as-is.
-      if (entry!.reasoningEfforts === false) {
-        declaredNonReasoning = true
-      } else {
-        const declared = (entry!.reasoningEfforts !== undefined && typeof entry!.reasoningEfforts === 'object' && entry!.reasoningEfforts !== null)
-          ? entry!.reasoningEfforts as Record<string, unknown>
-          : undefined
-        // In parallel: four sequential round-trips on a slow relay pushed
-        // the whole probe past the client's wait cap.
-        const verdicts = await Promise.all((['low', 'medium', 'high', 'max'] as const).map(async (level) => {
-          const declaredWire = declared?.[level]
-          const wire = typeof declaredWire === 'string' && declaredWire.length > 0 ? declaredWire : level
-          let probe = await send(probeRole, { reasoning_effort: wire })
-          if (!probe.ok && ambiguous(probe)) {
-            probe = await send(probeRole, { reasoning_effort: wire })
-          }
-          return { level, probe }
-        }))
-        for (const { level, probe } of verdicts) {
-          if (probe.ok) levels.push(level)
-          else if (refused(probe)) unsupported.push(level)
-          else unknownLevels.push(level)
-        }
-      }
     }
   }
 
-  // Combined write: capacity backfill + compat fix + validated effort dict
-  // in one models-array mutate, only when something actually changed AND
-  // no level verdict was ambiguous (an unknown must never rewrite config).
+  // Combined write: capacity backfill + compat fix in one models-array
+  // mutate, only when something actually changed.
   let applied = false
   let backfilled = 0
-  const effortVerdictClean = unknownLevels.length === 0
-  const nextDict: Record<string, unknown> | false | undefined = !effortVerdictClean
-    ? undefined
-    : levels.length > 0
-      ? { off: null, ...Object.fromEntries(levels.map((level) => [level, level])) }
-      : (canWire && baselineError === undefined && !declaredNonReasoning ? false : undefined)
-  const dictChanged = nextDict !== undefined && JSON.stringify(nextDict) !== JSON.stringify(entry?.reasoningEfforts)
   const compatChanged = roleFix === 'fixed'
-  if ((discovered.length > 0 || dictChanged || compatChanged) && models !== undefined) {
+  if ((discovered.length > 0 || compatChanged) && models !== undefined) {
     const next = models.map((m) => {
       const disc = discovered.find((d) => d.id === m.id)
       if (m.id !== model && disc === undefined) return m
@@ -417,7 +372,6 @@ async function runFullProbe(
         if (copy.maxTokens === undefined && disc.maxTokens !== undefined) { copy.maxTokens = disc.maxTokens; backfilled++ }
       }
       if (m.id === model) {
-        if (dictChanged) copy.reasoningEfforts = nextDict
         if (compatChanged) copy.compat = { ...((m.compat ?? {}) as Record<string, unknown>), supportsDeveloperRole: false }
       }
       return copy
@@ -433,9 +387,9 @@ async function runFullProbe(
     }
   }
   // Whether the write actually changed content — a listing-only discovery
-  // with a matching dict still mutates (last-writer-wins consistency), but
-  // that must not display as "written".
-  const changed = dictChanged || compatChanged || backfilled > 0
+  // still mutates (last-writer-wins consistency), but that must not
+  // display as "written".
+  const changed = compatChanged || backfilled > 0
 
   // 4. Image admission + latency — real stream through the LLM runtime,
   // after the role fix, so it exercises the exact post-fix configuration.
@@ -563,10 +517,6 @@ async function runFullProbe(
       imageVerdict,
       imageSynced,
       roleFix,
-      levels,
-      unsupported,
-      unknown: unknownLevels,
-      declaredNonReasoning,
       applied,
       changed: changedTotal,
       backfilled,
@@ -585,10 +535,6 @@ async function runFullProbe(
     imageVerdict,
     imageSynced,
     roleFix,
-    levels,
-    unsupported,
-    unknown: unknownLevels,
-    declaredNonReasoning,
     applied,
     changed: changedTotal,
     backfilled,
@@ -705,7 +651,7 @@ export function apply(ctx: Context) {
         const baseURL = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
         try {
           // One button, one full probe: discovery backfill + role admission
-          // + effort levels + image stream, all write-backs inside runFullProbe.
+          // + image stream, all write-backs inside runFullProbe.
           const result = await runFullProbe(ctx, provider, profile, baseURL, model)
           const settings = settingsApi(ctx)
           if (settings === undefined) return

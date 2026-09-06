@@ -1,0 +1,1 @@
+{"error":{"message":"Post \"https://api.b.ai/v1/chat/completions\": tls: failed to verify certificate: x509: certificate is valid for *.azureedge.net, not api.b.ai","type":"server_error","code":"internal_server_error"}}

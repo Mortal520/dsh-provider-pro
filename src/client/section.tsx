@@ -208,15 +208,9 @@ interface HostProbeResult {
   imageSynced?: boolean
   /** developer-role admission: admitted = wire accepts developer, fixed = compat written, already = already off. */
   roleFix?: 'admitted' | 'fixed' | 'already' | 'failed'
-  /** Efforts probe: wire-accepted levels + refused ones + whether settings were rewritten. */
-  levels?: string[]
-  unsupported?: string[]
-  /** Ambiguous verdicts (timeout/429/5xx after retry) — never written back. */
-  unknown?: string[]
   applied?: boolean
   /** True only when the write actually changed content (dict/compat/backfill). */
   changed?: boolean
-  declaredNonReasoning?: boolean
   contextWindow?: number
   maxTokens?: number
   backfilled?: number
@@ -369,7 +363,7 @@ async function sendProbeRequest(
     }
   }
   if (answer.mode === 'full') {
-    // One-button probe: capacity + role admission + effort levels + image.
+    // One-button probe: capacity backfill + role admission + image admission.
     const parts: string[] = []
     if (answer.contextWindow !== undefined) parts.push(`ctx: ${answer.contextWindow}`)
     if (answer.maxTokens !== undefined) parts.push(`max: ${answer.maxTokens}`)
@@ -377,11 +371,6 @@ async function sendProbeRequest(
     else if (answer.roleFix === 'already') parts.push('role: system')
     else if (answer.roleFix === 'fixed') parts.push('role: system (fixed)')
     else if (answer.roleFix === 'failed') parts.push('role: unresolved')
-    if (answer.levels !== undefined && answer.levels.length > 0) parts.push(`efforts: ${answer.levels.join('/')}`)
-    else if (answer.declaredNonReasoning === true) parts.push('efforts: non-reasoning')
-    else parts.push('efforts: none')
-    if (answer.unsupported !== undefined && answer.unsupported.length > 0) parts.push(`rejected: ${answer.unsupported.join('/')}`)
-    if (answer.unknown !== undefined && answer.unknown.length > 0) parts.push(`flaky: ${answer.unknown.join('/')}`)
     if (answer.imageVerdict === 'accepted') parts.push('image: accepted')
     else if (answer.imageVerdict === 'rejected') parts.push('image: rejected')
     if (answer.imageSynced) parts.push('input synced')
