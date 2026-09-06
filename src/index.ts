@@ -666,7 +666,10 @@ export function apply(ctx: Context) {
     () => {
       let cancelled = false
       let filling = false
-      let probing = false
+      /** Serializes probe runs: every accepted request eventually executes,
+       * in arrival order. No boolean guard — a boolean swallowed requests
+       * whenever a previous probe outlived the client's patience. */
+      let probeChain: Promise<void> = Promise.resolve()
       /** Last request id consumed, so a repeated settings/updated for the same
        * request does not re-run the probe (client re-uses one request slot). */
       let lastProbeId = ''
@@ -683,9 +686,13 @@ export function apply(ctx: Context) {
           filling = false
         }
       }
-      /** Consume the probe request slot (if any) and write the result back. */
-      const probe = async () => {
-        if (probing || cancelled) return
+      /** Consume the probe request slot (if any) and write the result back.
+       * Runs are chained so concurrent requests execute in order instead of
+       * being silently dropped, and every run is bounded by a hard budget
+       * slightly below the client's 110s wait cap — a hung stage can delay
+       * the answer but can no longer turn it into a client TIMEOUT. */
+      const probe = () => {
+        if (cancelled) return
         const section = readSection(ctx) as Record<string, unknown> | undefined
         const req = section?.[PROBE_REQ_FLAG]
         if (req === undefined || req === null || typeof req !== 'object') return
@@ -693,25 +700,40 @@ export function apply(ctx: Context) {
         if (typeof id !== 'string' || typeof provider !== 'string' || typeof model !== 'string') return
         if (id === lastProbeId) return
         lastProbeId = id
-        probing = true
-        const providers = (section?.providers ?? {}) as Record<string, Record<string, unknown> | undefined>
-        const profile = providers[provider]
-        const baseURL = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
-        try {
-          // One button, one full probe: discovery backfill + role admission
-          // + image stream, all write-backs inside runFullProbe.
-          const result = await runFullProbe(ctx, provider, profile, baseURL, model)
-          const settings = settingsApi(ctx)
-          if (settings === undefined) return
-          await settings.mutate(NS, [
-            { op: 'set', path: [PROBE_RESULT_FLAG], value: { ...result, id, provider, model } },
-            { op: 'unset', path: [PROBE_REQ_FLAG] },
-          ])
-        } catch {
-          // Result slot left unset; the client times out and reports.
-        } finally {
-          probing = false
-        }
+        probeChain = probeChain.then(async () => {
+          if (cancelled) return
+          const providers = ((readSection(ctx) as Record<string, unknown> | undefined)?.providers ?? {}) as Record<string, Record<string, unknown> | undefined>
+          const profile = providers[provider]
+          const baseURL = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
+          const writeResult = async (value: Record<string, unknown>): Promise<void> => {
+            const settings = settingsApi(ctx)
+            if (settings === undefined) return
+            await settings.mutate(NS, [
+              { op: 'set', path: [PROBE_RESULT_FLAG], value: { ...value, id, provider, model } },
+              { op: 'unset', path: [PROBE_REQ_FLAG] },
+            ])
+          }
+          try {
+            const result = await Promise.race([
+              runFullProbe(ctx, provider, profile, baseURL, model),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('probe budget (100s) exceeded — a probe stage hung beyond every per-stage cap')), 100000)),
+            ])
+            await writeResult(result)
+          } catch (error) {
+            // Never leave the client waiting blind: a failure (including the
+            // budget guard itself) is published as the probe result.
+            try {
+              await writeResult({
+                ok: false, mode: 'full',
+                totalMs: 0,
+                error: error instanceof Error ? error.message : String(error),
+              })
+            } catch {
+              // settings unavailable — client will TIMEOUT and clean the slot
+            }
+          }
+        }).catch(() => undefined)
       }
       const handler = (payload?: unknown) => {
         // `settings/updated` also fires for other namespaces; only ours matters.
