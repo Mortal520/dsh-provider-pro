@@ -336,11 +336,19 @@ async function sendProbeRequest(
     const isInfra = infraMatch !== undefined
     if (isInfra) {
       const host = infraMatch?.[1] ?? infraMatch?.[2]
+      // Hostless branches (connection refused / unexpected eof / …) have no
+      // capture group — echo the matched phrase so the line is diagnosable
+      // instead of a bare "gateway is broken".
+      const detail = host !== undefined
+        ? `（无法解析/连接 ${host}）`
+        : infraMatch?.[0] !== undefined
+          ? `（传输层错误: ${infraMatch[0]}）`
+          : ''
       return {
         status: 'failure', provider, model, totalMs: answer.totalMs,
         failure: {
           code: 'INFRA',
-          message: `网关基础设施故障${host !== undefined ? `（无法解析/连接 ${host}）` : ''} — 模型与插件均无问题；网关上游 DNS/网络恢复后重试`,
+          message: `网关基础设施故障${detail} — 模型与插件均无问题；网关上游 DNS/网络恢复后重试`,
         },
       }
     }
