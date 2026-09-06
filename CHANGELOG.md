@@ -6,7 +6,7 @@ All notable changes to dsh-provider-pro.
 
 ### Added
 - **One-button full model probe** (replaces the 0.4.0 capabilities/deep
-  split): a single "Probe" button per model row measures everything in
+  split): a single "Probe" button per model row measures three things in
   one pass —
   1. context window/maxTokens via `discoverModels` (GET /v1/models),
      missing values backfilled into the model entry;
@@ -18,28 +18,38 @@ All notable changes to dsh-provider-pro.
      `system` baseline settles it; a refusal with a passing `system`
      auto-writes `compat.supportsDeveloperRole: false` so pi-ai falls
      back to `system`;
-  3. **reasoning-effort levels, measured as real** — each of
-     low/medium/high/max gets one `max_tokens: 1` request carrying the
-     declared wire spelling (`reasoning_effort`); refused levels are
-     dropped and the validated `reasoningEfforts` dict is written back.
-     All levels refused → the entry becomes a genuine non-reasoning
-     model (`reasoningEfforts: false`), so the chat picker stops
-     offering controls the wire rejects;
-  4. **image admission + latency** — a real stream carrying a 1×1 PNG
+  3. **image admission + latency** — a real stream carrying a 1×1 PNG
      through the LLM runtime, run last so it exercises the exact
-     post-fix configuration the chat will use.
-  All settings write-backs (backfill + compat + efforts) land in ONE
-  models-array mutate before the stream, so results can never clobber
-  each other. Wire checks run only for `openai-completions` routes and
-  skip silently otherwise.
+     post-fix configuration the chat will use; the measured verdict is
+     synced into the `input` declaration (adds/removes only `image`;
+     other declared modalities are preserved).
+  Each write-back re-reads the freshest settings right before its mutate
+  and writes only fields that actually changed, so concurrent edits
+  (UI, auto-fill) survive. Wire checks run only for
+  `openai-completions` routes and skip silently otherwise.
 - Provider-wide "Probe all" now walks every model through the same full
   probe (it also feeds the alive badges). Each result line shows
-  `ctx · max · role · efforts/rejected · image · first-token ·
-  written/backfilled`.
+  `ctx · max · role · image · first-token · written/backfilled`. Models
+  with an active credential cooldown are skipped and keep their previous
+  result.
 
 ### Changed
+- **Reasoning-effort levels are no longer wire-probed.** The 0.5.0
+  drafts validated low/medium/high/max with per-level requests and
+  rewrote `reasoningEfforts` accordingly; that rewrite proved
+  unreliable on heterogeneous relays (intermittent upstream 5xx
+  produced "flaky" verdicts) and could drop levels the gateway
+  normally accepts. The default five-level dictionary is instead
+  provided by the `fillEfforts` auto-fill pass, which the probe never
+  overwrites.
 - Probe summary formatting consolidated; removed the separate
   "Capabilities"/"Deep probe" buttons and their locale keys.
+- A stream that yields no first token within the 30s budget is an
+  explicit probe failure (the model did not answer) instead of a
+  success with a budget note.
+- The provider badge reports "cooldown" only when EVERY failed model
+  carries a defined, still-active cooldown; any hard failure counts as
+  down.
 
 ## [0.4.0] - 2026-09-02
 

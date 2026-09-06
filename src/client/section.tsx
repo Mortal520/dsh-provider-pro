@@ -280,8 +280,9 @@ async function sendProbeRequest(
     disposer = events.on(() => {
       void readSlot().then(done)
     })
-    // The full probe issues up to 7 small wire requests (discovery, role
-    // pair, four levels) plus the image stream. The host now bounds every
+    // The full probe issues up to 4 small wire requests (baseline user,
+    // possible retry, developer, system fallback) plus the image stream.
+    // The host now bounds every
     // stage: wire requests 10s each, discovery 10s, image stream 30s —
     // worst case ~100s — so the client cap sits just above it. A TIMEOUT
     // past that means the host half is genuinely stuck, not merely slow.
@@ -595,14 +596,21 @@ function ProviderCard(props: {
   }
 
   // Provider-level alive badge: aggregated from per-model results. Any
-  // success = up; every model cooling = cooling; all hard failures = down;
-  // none run yet = untested.
+  // success = up; EVERY failure carrying a defined, still-active cooldown
+  // = cooling; any hard failure (PROBE_FAIL/INFRA without an active
+  // cooldown) = down; none run yet = untested. `cooldownUntil ===
+  // undefined` must NOT satisfy the cooling predicate — one hard failure
+  // next to one cooldown is a down provider, not an amber one.
   const providerAlive: 'up' | 'down' | 'unknown' | 'cooldown' = (() => {
     if (probeAllResults.size === 0) return 'unknown'
     const values = [...probeAllResults.values()]
     if (values.some((r) => r.status === 'success')) return 'up'
-    if (values.every((r) => r.status === 'failure' && (r.failure?.cooldownUntil === undefined || r.failure.cooldownUntil > Date.now()))
-      && values.some((r) => r.failure?.cooldownUntil !== undefined)) return 'cooldown'
+    const allCooling = values.every((r) => {
+      if (r.status !== 'failure') return false
+      const until = r.failure?.cooldownUntil
+      return until !== undefined && until > Date.now()
+    })
+    if (allCooling) return 'cooldown'
     return 'down'
   })()
   const badgeMark = providerAlive === 'up' ? '✓' : providerAlive === 'down' ? '✗' : providerAlive === 'cooldown' ? '◷' : '·'

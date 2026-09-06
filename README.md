@@ -32,23 +32,23 @@ out of the box, with no per-model configuration.
    自行决定）。切换发生在聊天里，无需设置。
 3. **图片输入声明** — 每个模型卡片内提供「支持图片输入」复选框，
    勾选即写入 `input: [text, image]`，DSH 随即允许向该模型附加图片。
-4. **一键全量探测与测活**（内置）— 每个模型旁一个「探测」按钮，一次实测四项：
+4. **一键全量探测与测活**（内置）— 每个模型旁一个「探测」按钮，一次实测三项：
    - **上下文窗口**：调 `/v1/models` 拉取 `contextWindow`/`maxTokens`，
      缺失字段自动回填（手工值不覆盖）；
    - **角色兼容**：pi-ai 的 openai-completions 兼容层默认对推理模型发送
      `developer` 角色（部分上游如 GLM 中转直接拒绝，报 1214「角色信息不正确」）。
      探测发极小请求实测；被拒且 `system` 可用时自动写入
      `compat.supportsDeveloperRole: false`（回退 system），即刻修复；
-   - **推理等级据实校准**：low/medium/high/max 逐档发送 `reasoning_effort`
-     极小请求（`max_tokens: 1`），被拒档位从 `reasoningEfforts` 中移除，
-     全拒则写 `false`（真·非推理模型）——聊天里的档位开关从此只出现
-     上游真正接受的档；
+   - **推理等级**：不由探测判断；缺少 `reasoningEfforts` 的模型由自动补档器
+     恢复默认五档 `off/low/medium/high/max`，探测从不覆写该字典；
    - **图片输入 + 延迟**：通过 DSH LLM 运行时发送带 1×1 PNG 的真实流式
-     请求（最后一步，验证修复后的真实配置），报告首 token 延迟与图片接受。
-   所有写回（回填 + compat + 档位字典）合并在**一次** models 数组 mutate 中，
-   互不覆盖。wire 检查仅对 `openai-completions` 路由生效。
-   供应商卡片头显示 可达/不可达/未测 徽章，模型行显示对应状态点；
-   「一键探测」对全部模型走同一全量探测。
+     请求（最后一步，验证修复后的真实配置），报告首 token 延迟与图片接受，
+     并把结果同步到 `input` 声明（只增删 `image`，其他 modality 保留）。
+   写回（容量回填 + compat + 图片声明）各自在 mutate 前重新读取最新配置，
+   只写真正变化的字段，互不覆盖；流式探测 30s 预算内无首 token 判为失败，
+   不会误报存活。wire 检查仅对 `openai-completions` 路由生效。
+   供应商卡片头显示 可达/不可达/冷却/未测 徽章，模型行显示对应状态点；
+   「一键探测」对全部模型走同一全量探测（冷却中的模型跳过，保留上次结果）。
 
 ### 安装
 
@@ -148,18 +148,22 @@ pnpm run smoke    # Host 行为冒烟（fetch 补丁 / 补档器 / 总开关）
      some upstreams (GLM behind a relay, error 1214) refuse. A minimal wire
      request verifies it; when `developer` is refused while `system` passes,
      `compat.supportsDeveloperRole: false` is written automatically.
-   - **Reasoning levels, measured as real**: each of low/medium/high/max
-     gets one `max_tokens: 1` request carrying `reasoning_effort`; refused
-     levels are dropped from `reasoningEfforts` (all refused → the entry
-     becomes a non-reasoning model, `reasoningEfforts: false`) — the chat
-     picker only ever offers levels the upstream actually accepts.
+   - **Reasoning levels**: not probed. Models lacking a `reasoningEfforts`
+     dictionary get the default five-level dict (off / low / medium / high /
+     max) from the auto-fill pass; the probe never overwrites it.
    - **Image input + latency**: a real stream carrying a 1×1 PNG through
      DSH's LLM runtime (run last, exercising the exact post-fix config)
-     reports first-token latency and image admission.
-   All write-backs (backfill + compat + efforts) land in ONE models-array
-   mutate. Wire checks apply only to `openai-completions` routes.
-   Provider card headers show an up/down/untested badge and each model row a
-   matching status dot, aggregated from the latest results.
+     reports first-token latency and image admission, and syncs the
+     `input` declaration (adds/removes only `image`; other declared
+     modalities are preserved). A stream that yields no first token within
+     the 30s budget is an explicit failure, never a false "alive".
+   Each write-back (backfill + compat + image declaration) re-reads the
+   freshest settings right before its mutate and writes only fields that
+   actually changed. Wire checks apply only to `openai-completions` routes.
+   Provider card headers show an up/down/cooldown/untested badge and each
+   model row a matching status dot, aggregated from the latest results
+   ("Probe all" skips models with an active cooldown and keeps their
+   previous result).
 
 ### Install
 
