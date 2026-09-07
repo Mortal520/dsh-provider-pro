@@ -25,6 +25,31 @@ import type {
 import { NS } from './types'
 import { FILL_REASONING_EFFORTS, LEGACY_REASONING_EFFORTS, INPUT_WITH_IMAGE, matchesEfforts, PROBE_REQ_FLAG, PROBE_RESULT_FLAG } from '../shared.ts'
 
+/**
+ * Mutate with automatic lost-update retry: describe the freshest revision,
+ * attempt the write, and on a revision conflict re-read + retry (bounded).
+ * The settings service bumps its revision for EVERY write in the namespace
+ * (probe results, auto-fill, other pages), so a caller-provided snapshot
+ * revision races with any concurrent writer — this helper owns the loop.
+ */
+async function mutateFresh(
+  api: SettingsWireFace,
+  ops: SettingsPathOp[],
+  attempts = 4,
+): Promise<{ ok: boolean; error?: { message?: string } }> {
+  for (let i = 0; i < attempts; i++) {
+    const view = await api.describe().then((r) => (r.ok ? r.value : undefined)).catch(() => undefined)
+    const ns = view?.namespaces.find((entry) => entry.ns === NS)
+    if (ns === undefined) return { ok: false, error: { message: 'llm-pi-ai namespace not readable' } }
+    const response = await api.mutate(NS, ops, ns.revision)
+    if (response.ok) return { ok: true }
+    const message = response.error?.message ?? ''
+    // Anything other than a revision conflict is a real failure — surface it.
+    if (!/revision/i.test(message)) return { ok: false, error: { message } }
+  }
+  return { ok: false, error: { message: 'settings kept changing while writing (retried 4x) — try again' } }
+}
+
 /** Cross-render event hook the section subscribes to (wired in client/index.ts). */
 export interface SectionEvents {
   on(fn: () => void): () => void
@@ -238,18 +263,14 @@ async function sendProbeRequest(
   mode: 'full',
 ): Promise<ProbeResult> {
   const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-  // Freshest revision: the write advances the document, and probe-all walks
-  // many models in sequence, so a section-load snapshot goes stale quickly.
-  const snapshot = await api.describe().then((r) => (r.ok ? r.value : undefined)).catch(() => undefined)
-  const nsView = snapshot?.namespaces.find((entry) => entry.ns === NS)
-  if (nsView === undefined) {
-    return { status: 'failure', provider, model, failure: { code: 'NO_NS', message: 'llm-pi-ai namespace not readable' } }
-  }
-  // Clear any stale result for this probe; write the request. The host reacts
-  // on the resulting settings/updated, runs the probe, then publishes.
-  const write = await api.mutate(NS, [
+  // Write the request with fresh-revision retry: probe-all walks many models
+  // in sequence while the host writes probe results and auto-fill between
+  // our describe() and mutate(), so a snapshot revision races constantly.
+  // Clear any stale result for this probe; the host reacts on the resulting
+  // settings/updated, runs the probe, then publishes.
+  const write = await mutateFresh(api, [
     { op: 'set', path: [PROBE_REQ_FLAG], value: { id, provider, model, mode } },
-  ], nsView.revision)
+  ])
   if (!write.ok) {
     return { status: 'failure', provider, model, failure: { code: 'WRITE_FAIL', message: write.error?.message ?? 'probe request write failed' } }
   }
@@ -293,12 +314,9 @@ async function sendProbeRequest(
 
   if (answer === undefined) {
     // Timeout: likely the host probe never ran (LLM runtime absent) or the
-    // request is stuck. Clean the request slot so a retry re-fires.
-    const fresh = await api.describe().then((r) => (r.ok ? r.value : undefined)).catch(() => undefined)
-    const freshNs = fresh?.namespaces.find((entry) => entry.ns === NS)
-    if (freshNs !== undefined) {
-      void api.mutate(NS, [{ op: 'unset', path: [PROBE_REQ_FLAG] }], freshNs.revision).catch(() => undefined)
-    }
+    // request is stuck. Clean the request slot so a retry re-fires
+    // (mutateFresh re-describes internally).
+    void mutateFresh(api, [{ op: 'unset', path: [PROBE_REQ_FLAG] }]).catch(() => undefined)
     return { status: 'failure', provider, model, failure: { code: 'TIMEOUT', message: 'probe timed out (host probe did not respond)' } }
   }
 
@@ -419,14 +437,13 @@ function ModelRow(props: {
   route: string
   profile: ProviderProfile
   modelIndex: number
-  revision: number
   api: SettingsWireFace
   events: SectionEvents
   t: T
   probeResult?: ProbeResult
   onMutated: () => void
 }) {
-  const { route, profile, modelIndex, revision, api, events, t, probeResult: probeAllResult, onMutated } = props
+  const { route, profile, modelIndex, api, events, t, probeResult: probeAllResult, onMutated } = props
   const model = profile.models?.[modelIndex]
   if (!model) return null
   const hasImage = Array.isArray(model.input) && model.input.includes('image')
@@ -467,7 +484,7 @@ function ModelRow(props: {
       return copy
     })
     const op: SettingsPathOp = { op: 'set', path: ['providers', route, 'models'], value: models }
-    const response = await api.mutate(NS, [op], revision)
+    const response = await mutateFresh(api, [op])
     if (response.ok) onMutated()
   }
 
@@ -537,13 +554,12 @@ function ModelRow(props: {
 function ProviderCard(props: {
   route: string
   profile: ProviderProfile
-  revision: number
   api: SettingsWireFace
   events: SectionEvents
   t: T
   onSaved: () => void
 }) {
-  const { route, profile, revision, api, events, t, onSaved } = props
+  const { route, profile, api, events, t, onSaved } = props
   const [ua, setUa] = useState(profile.userAgent ?? '')
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -562,7 +578,7 @@ function ProviderCard(props: {
           ? { op: 'unset', path: ['providers', route, 'userAgent'] }
           : { op: 'set', path: ['providers', route, 'userAgent'], value: ua.trim() },
       ]
-      const response = await api.mutate(NS, ops, revision)
+      const response = await mutateFresh(api, ops)
       if (!response.ok) {
         setFailure(t('saveFailed') + (response.error?.message ?? ''))
         return
@@ -702,7 +718,6 @@ function ProviderCard(props: {
                   route={route}
                   profile={profile}
                   modelIndex={idx}
-                  revision={revision}
                   api={api}
                   events={events}
                   t={t}
@@ -785,7 +800,7 @@ export function ProviderProSection(props: SectionProps) {
           }
         }
       }
-      const response = await api.mutate(NS, ops, view.revision)
+      const response = await mutateFresh(api, ops)
       if (!response.ok) {
         setFlipFailure(t('saveFailed') + (response.error?.message ?? ''))
         return
@@ -857,7 +872,6 @@ export function ProviderProSection(props: SectionProps) {
                 key={route}
                 route={route}
                 profile={providers[route] ?? {}}
-                revision={view.revision}
                 api={api}
                 events={events}
                 t={t}
