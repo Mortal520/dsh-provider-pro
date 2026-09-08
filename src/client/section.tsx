@@ -44,8 +44,12 @@ async function mutateFresh(
     const response = await api.mutate(NS, ops, ns.revision)
     if (response.ok) return { ok: true }
     const message = response.error?.message ?? ''
-    // Anything other than a revision conflict is a real failure — surface it.
-    if (!/revision/i.test(message)) return { ok: false, error: { message } }
+    // Retry ONLY on a genuine lost-update conflict. The settings service
+    // reports it as "changed since it was read (expected revision N, now M)";
+    // a bare /revision/i match is too wide — a failure message containing
+    // the word "revision" (unrelated) would otherwise be retried 4× for no
+    // reason (4 writes, 4× the latency).
+    if (!/changed since it was read|expected revision/i.test(message)) return { ok: false, error: { message } }
   }
   return { ok: false, error: { message: 'settings kept changing while writing (retried 4x) — try again' } }
 }
@@ -314,9 +318,18 @@ async function sendProbeRequest(
 
   if (answer === undefined) {
     // Timeout: likely the host probe never ran (LLM runtime absent) or the
-    // request is stuck. Clean the request slot so a retry re-fires
-    // (mutateFresh re-describes internally).
-    void mutateFresh(api, [{ op: 'unset', path: [PROBE_REQ_FLAG] }]).catch(() => undefined)
+    // request is stuck. Clean the request slot ONLY if it still holds THIS
+    // request — probe-all may already have written the next model's request,
+    // and a blind unset would delete that one (the next probe would never
+    // reach the host).
+    void (async () => {
+      const view = await api.describe().then((r) => (r.ok ? r.value : undefined)).catch(() => undefined)
+      const ns = view?.namespaces.find((entry) => entry.ns === NS)
+      const user = (ns?.user ?? ns?.value ?? {}) as Record<string, unknown>
+      const req = user[PROBE_REQ_FLAG] as { id?: unknown } | undefined
+      if (req === undefined || typeof req !== 'object' || req.id !== id) return
+      await mutateFresh(api, [{ op: 'unset', path: [PROBE_REQ_FLAG] }]).catch(() => undefined)
+    })()
     return { status: 'failure', provider, model, failure: { code: 'TIMEOUT', message: 'probe timed out (host probe did not respond)' } }
   }
 
@@ -441,17 +454,26 @@ function ModelRow(props: {
   events: SectionEvents
   t: T
   probeResult?: ProbeResult
+  /** Manual probe results also feed the provider card's aggregate badge. */
+  onProbeResult?: (modelId: string, result: ProbeResult) => void
   onMutated: () => void
 }) {
-  const { route, profile, modelIndex, api, events, t, probeResult: probeAllResult, onMutated } = props
+  const { route, profile, modelIndex, api, events, t, probeResult: probeAllResult, onProbeResult, onMutated } = props
   const model = profile.models?.[modelIndex]
-  if (!model) return null
-  const hasImage = Array.isArray(model.input) && model.input.includes('image')
+  // Hooks MUST run unconditionally — an early return before useState makes
+  // the hook order vary between renders (deleted model row → React crash).
   const [probeResult, setProbeResult] = useState<ProbeResult>()
   const [probeBusy, setProbeBusy] = useState(false)
+  if (!model) return null
+  const hasImage = Array.isArray(model.input) && model.input.includes('image')
 
-  // Merge: per-model probe result takes priority over probe-all result
-  const displayResult = probeResult ?? probeAllResult
+  // Merge: the NEWER result wins, not "manual always beats bulk" — a stale
+  // manual verdict used to pin itself over a fresh probe-all pass forever.
+  const displayResult = (() => {
+    if (probeResult === undefined) return probeAllResult
+    if (probeAllResult === undefined) return probeResult
+    return (probeAllResult.receivedAt ?? 0) > (probeResult.receivedAt ?? 0) ? probeAllResult : probeResult
+  })()
 
   // Declared capacity from the settings entry (hand-set or probe-backfilled).
   // Compact display: 1024-multiples render KiB-style (262144 → 256k),
@@ -492,10 +514,14 @@ function ModelRow(props: {
     setProbeBusy(true)
     setProbeResult(undefined)
     try {
-      setProbeResult(await sendProbeRequest(api, route, model.id, events, 'full'))
+      const result = { ...(await sendProbeRequest(api, route, model.id, events, 'full')), receivedAt: Date.now() }
+      setProbeResult(result)
+      onProbeResult?.(model.id, result)
     } catch (error: unknown) {
       const err = error as { message?: string }
-      setProbeResult({ status: 'failure', provider: route, model: model.id, totalMs: 0, failure: { code: 'ERROR', message: err.message ?? String(error) } })
+      const result: ProbeResult = { status: 'failure', provider: route, model: model.id, totalMs: 0, receivedAt: Date.now(), failure: { code: 'ERROR', message: err.message ?? String(error) } }
+      setProbeResult(result)
+      onProbeResult?.(model.id, result)
     } finally {
       setProbeBusy(false)
     }
@@ -569,6 +595,15 @@ function ProviderCard(props: {
   const [probeAllBusy, setProbeAllBusy] = useState(false)
   const [modelsExpanded, setModelsExpanded] = useState(false)
 
+  // External edits: the UA input is initialized from profile.userAgent once,
+  // so a change made in another settings page (or by the host) would be
+  // hidden and then OVERWRITTEN by a later Save. Re-sync from the profile
+  // whenever the stored value changes, but never clobber in-progress typing.
+  const externalUa = profile.userAgent ?? ''
+  useEffect(() => {
+    if (!dirty) setUa(externalUa)
+  }, [externalUa]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const save = async () => {
     setBusy(true)
     setFailure(undefined)
@@ -600,23 +635,37 @@ function ProviderCard(props: {
   const probeAll = async () => {
     if (!profile.models?.length) return
     setProbeAllBusy(true)
-    // Models with a known, still-active credential cooldown are skipped —
-    // the gateway answered authoritatively for hours; re-hitting it adds
-    // nothing. Their previous result stays on display.
-    const previous = probeAllResults
-    const now = Date.now()
-    const results = new Map<string, ProbeResult>()
-    for (const model of profile.models) {
-      const priorCooldown = previous.get(model.id)?.failure?.cooldownUntil
-      if (priorCooldown !== undefined && priorCooldown > now) {
-        results.set(model.id, previous.get(model.id)!)
-        continue
+    try {
+      // Models with a known, still-active credential cooldown are skipped —
+      // the gateway answered authoritatively for hours; re-hitting it adds
+      // nothing. Their previous result stays on display.
+      const previous = probeAllResults
+      const now = Date.now()
+      const results = new Map<string, ProbeResult>()
+      for (const model of profile.models) {
+        const priorCooldown = previous.get(model.id)?.failure?.cooldownUntil
+        if (priorCooldown !== undefined && priorCooldown > now) {
+          results.set(model.id, previous.get(model.id)!)
+          continue
+        }
+        try {
+          const result = await sendProbeRequest(api, route, model.id, events, 'full')
+          results.set(model.id, { ...result, receivedAt: Date.now() })
+        } catch (error) {
+          // One model's unexpected exception must not abort the walk or
+          // wedge the busy flag — record it as that model's failure and
+          // continue with the rest.
+          results.set(model.id, {
+            status: 'failure', provider: route, model: model.id, totalMs: 0, receivedAt: Date.now(),
+            failure: { code: 'ERROR', message: error instanceof Error ? error.message : String(error) },
+          })
+        }
+        setProbeAllResults(new Map(results))
       }
-      results.set(model.id, await sendProbeRequest(api, route, model.id, events, 'full'))
-      setProbeAllResults(new Map(results))
+    } finally {
+      // Always restores the button even if the loop itself throws.
+      setProbeAllBusy(false)
     }
-    setProbeAllResults(new Map(results))
-    setProbeAllBusy(false)
   }
 
   // Provider-level alive badge: aggregated from per-model results. Any
@@ -624,10 +673,17 @@ function ProviderCard(props: {
   // = cooling; any hard failure (PROBE_FAIL/INFRA without an active
   // cooldown) = down; none run yet = untested. `cooldownUntil ===
   // undefined` must NOT satisfy the cooling predicate — one hard failure
-  // next to one cooldown is a down provider, not an amber one.
+  // next to one cooldown is a down provider, not an amber one. Entries for
+  // models no longer in the profile are pruned so a deleted model's stale
+  // verdict cannot skew the badge.
   const providerAlive: 'up' | 'down' | 'unknown' | 'cooldown' = (() => {
-    if (probeAllResults.size === 0) return 'unknown'
-    const values = [...probeAllResults.values()]
+    const live = new Map<string, ProbeResult>()
+    for (const model of profile.models ?? []) {
+      const hit = probeAllResults.get(model.id)
+      if (hit !== undefined) live.set(model.id, hit)
+    }
+    if (live.size === 0) return 'unknown'
+    const values = [...live.values()]
     if (values.some((r) => r.status === 'success')) return 'up'
     const allCooling = values.every((r) => {
       if (r.status !== 'failure') return false
@@ -722,6 +778,13 @@ function ProviderCard(props: {
                   events={events}
                   t={t}
                   probeResult={probeAllBusy || probeAllResults.size > 0 ? probeAllResults.get(model.id) : undefined}
+                  onProbeResult={(modelId, result) =>
+                    setProbeAllResults((prev) => {
+                      const next = new Map(prev)
+                      next.set(modelId, result)
+                      return next
+                    })
+                  }
                   onMutated={onSaved}
                 />
               ))}
@@ -761,7 +824,7 @@ export function ProviderProSection(props: SectionProps) {
           if (!cancelled) setLoadError(response.error?.message ?? t('loadFailed'))
           return
         }
-        const found = response.value.namespaces.find((entry) => entry.ns === NS)
+        const found = response.value?.namespaces.find((entry) => entry.ns === NS)
         if (!cancelled && found !== undefined) {
           setView(found)
           const section = userSectionOf(found)
@@ -790,6 +853,9 @@ export function ProviderProSection(props: SectionProps) {
     if (api === undefined || view === undefined || flipBusy) return
     setFlipBusy(true)
     setFlipFailure(undefined)
+    // A pending/persisted "saved" from a PREVIOUS flip must not stay visible
+    // while this flip is in flight or fails — reset it for the new attempt.
+    setFlipSaved(false)
     try {
       const ops: SettingsPathOp[] = [{ op: 'set', path: [AUTO_REASONING_FLAG], value: next }]
       if (!next) {

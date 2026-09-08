@@ -2,6 +2,64 @@
 
 All notable changes to dsh-provider-pro.
 
+## [0.5.1] - 2026-09-08
+
+### Added
+- **Probe cancellation & supersede guard**: every probe run carries an
+  AbortController and a generation token. The 100s host budget, plugin
+  disposal, and each newer probe request abort the previous run's stream /
+  wire / discovery requests, and every settings write checks `isCurrent()`
+  before touching the document — a timed-out probe can no longer publish a
+  stale result, unset a NEWER request slot, or clobber a newer probe's
+  result.
+- **Discovery cache keyed by baseURL + credential** (not baseURL alone), so
+  two routes sharing an endpoint with different credentials cannot reuse an
+  incompatible `/v1/models` listing; the 10s cap ABORTS the underlying
+  discovery request instead of just abandoning the wait.
+- **Plugin-internal write queue**: auto-fill, capacity backfill, compat fix,
+  and image-declaration sync serialize their read→write cycles through one
+  queue — the previous fill-vs-probe race could overwrite concurrent edits.
+
+### Changed
+- **Role classification narrowed**: `compat.supportsDeveloperRole: false`
+  is only written when the developer refusal carries role-specific evidence
+  (400/422 or 5xx whose body names roles / 1214 / 角色), never for bare
+  auth (401/403), unknown-model (404), quota, or generic 5xx — those used
+  to produce persistent bogus compat writes.
+- **Image rejection detection**: a stream `finish` chunk with an
+  error/aborted reason naming the image classifies `imageVerdict: rejected`
+  and clears the declaration (providers encoding refusal as an error finish
+  were previously left unclassified forever).
+- **Stream iterator cleanup**: `iterator.return()` is awaited with its
+  rejection caught instead of fire-and-forget (an unhandled rejection and a
+  dangling upstream request after timeout).
+- **UA baseURL matching is origin + path-boundary safe**: `https://h/api`
+  no longer matches `/apiX` or an attacker-style `h.evil` host-prefix.
+- **Client probe-all**: a single model's exception no longer aborts the
+  walk or wedges the busy flag; the button is always restored via `finally`.
+  The timeout cleanup only unsets the request slot when it still holds THIS
+  request — a blind unset used to delete the next model's freshly written
+  request.
+- **Result freshness**: results carry a `receivedAt` stamp; the newer of a
+  manual or bulk probe result wins. Manual probe results also feed the
+  provider badge; the badge only counts models still in the profile.
+- **UA input re-syncs** with an externally changed `userAgent` without
+  clobbering in-progress typing.
+- **Revision-conflict retry narrowed** to the actual conflict message
+  ("changed since it was read" / "expected revision") instead of any error
+  containing "revision".
+- **Master-switch "saved" indicator resets** at each flip start;
+  `RpcResult.value` is typed optional; `ModelRow` no longer returns before
+  its hooks (a deleted model row could crash React with a hook-order
+  violation).
+
+### Docs & packaging
+
+- **README/install examples updated**: `--profile desktop` (was `web`),
+  tarball example 0.5.1 (was 0.3.0), feature intro "two" → "four".
+- **package.json**: adds `engines: node >=20` and a `verify` script
+  (check + smoke + pack); version 0.5.1.
+
 ## [0.5.0] - 2026-09-05
 
 ### Added

@@ -3,7 +3,10 @@
  *
  * Loads the built lib/index.js, mounts it on a fake cordis ctx, and asserts
  * the fetch patch rewrites `user-agent` only for requests whose URL starts
- * with a configured provider baseURL. Run: node smoke-provider-pro.mjs
+ * with a configured provider baseURL — now origin + path-boundary matched.
+ * Also covers the auto-fill pass, the master switch, and the probe
+ * consumer's serialization/idempotency/generation supersede behavior.
+ * Run: node smoke-provider-pro.mjs
  *
  * IMPORTANT: every request in this test goes through the PATCHED
  * `globalThis.fetch` (assigned to `patched` below) — never the fake
@@ -228,3 +231,80 @@ assert.strictEqual(offCtx.__mutated().length, 0, 'master switch OFF suppresses t
 assert.strictEqual(offSection.providers.gw.models[0].reasoningEfforts, undefined, 'model left untouched when switch OFF')
 offCtx.__dispose()
 console.log('smoke-provider-pro: OK — master switch suppresses auto-fill when off')
+
+/* ------------------------------------------------ UA URL-boundary safety */
+
+const boundarySection = {
+  providers: {
+    api: { baseURL: 'https://api.example.com/api', userAgent: 'Api/1' },
+    host: { baseURL: 'https://api.example.com/', userAgent: 'Host/1' },
+  },
+}
+const boundaryCtx = makeCtx(boundarySection)
+apply(boundaryCtx)
+await new Promise((r) => setTimeout(r, 30))
+const bPatched = globalThis.fetch
+
+// Path boundary: /api must NOT match /apiX (same origin, adjacent path).
+await bPatched('https://api.example.com/apiX/v1/models', { headers: { 'user-agent': 'attribution' } })
+assert.strictEqual(observedInit.headers.get('user-agent'), 'attribution', '/api does not match /apiX')
+
+// Origin boundary: an attacker-controlled host prefix must NOT match.
+await bPatched('https://api.example.com.evil/v1/models', { headers: { 'user-agent': 'attribution' } })
+assert.strictEqual(observedInit.headers.get('user-agent'), 'attribution', 'host-prefix lookalike not rewritten')
+
+// Exact path and subpaths of the configured base still match (longest prefix).
+await bPatched('https://api.example.com/api/chat/completions', { headers: { 'user-agent': 'attribution' } })
+assert.strictEqual(observedInit.headers.get('user-agent'), 'Api/1', 'exact base path matches')
+
+boundaryCtx.__dispose()
+console.log('smoke-provider-pro: OK — UA baseURL matching is origin+path boundary safe')
+
+/* ------------------------------------------------- probe consumer idempotency */
+
+const probeSection = {
+  providers: {
+    gw: { baseURL: 'https://api.example.com/v1', models: [{ id: 'm1' }] },
+  },
+}
+const probeCtx = makeCtx(probeSection)
+apply(probeCtx)
+await new Promise((r) => setTimeout(r, 30))
+const probeWrites = () => probeCtx.__mutated()
+
+// Request 1: host consumes it stolen from the slot, publishes a result
+// (LLM runtime absent in the fake ctx -> an explicit failure result),
+// and only THEN records the consumed id.
+probeCtx.__setSection({
+  ...probeSection,
+  dshProviderProProbe: { id: 'req-1', provider: 'gw', model: 'm1', mode: 'full' },
+})
+probeCtx.__bump('llm-pi-ai')
+await new Promise((r) => setTimeout(r, 50))
+const resultOps = probeWrites().flatMap((w) => w.ops).filter((op) => op.path[0] === 'dshProviderProProbeResult')
+assert.ok(resultOps.length >= 1, 'probe request consumed and a result published')
+const published = resultOps[resultOps.length - 1].value
+assert.strictEqual(published.id, 'req-1', 'result carries the request id')
+assert.strictEqual(published.ok, false, 'result is a failure (no llm runtime)')
+assert.match(published.error ?? '', /LLM runtime not available/, 'failure states the missing runtime')
+
+// Same request id re-delivered (e.g. client retry after a failed unset) is
+// NOT re-run: idempotent until a NEW request arrives.
+const writesBefore = probeWrites().length
+probeCtx.__bump('llm-pi-ai')
+await new Promise((r) => setTimeout(r, 50))
+assert.strictEqual(probeWrites().length, writesBefore, 'same request id is not re-run')
+
+// A NEW request id supersedes: the old generation is no longer current, so
+// its late writes are guarded; the new one runs and publishes.
+probeCtx.__setSection({
+  ...probeSection,
+  dshProviderProProbe: { id: 'req-2', provider: 'gw', model: 'm1', mode: 'full' },
+})
+probeCtx.__bump('llm-pi-ai')
+await new Promise((r) => setTimeout(r, 50))
+const resultOps2 = probeWrites().flatMap((w) => w.ops).filter((op) => op.path[0] === 'dshProviderProProbeResult')
+assert.strictEqual(resultOps2[resultOps2.length - 1].value.id, 'req-2', 'new request id supersedes and publishes')
+
+probeCtx.__dispose()
+console.log('smoke-provider-pro: OK — probe consumer is serialized, idempotent, and supersedes by generation')

@@ -41,7 +41,10 @@ export interface PiAiSection {
 }
 interface RpcResult<T> {
     ok: boolean;
-    value: T;
+    /** Present on success; wire error envelopes omit it. Optional so callers
+     * are forced to handle the missing-value case instead of the type lying
+     * that it is always defined. */
+    value?: T;
     error?: {
         code?: string;
         message: string;
@@ -94,6 +97,10 @@ export interface ProbeResult {
         completionTokens?: number;
         totalTokens?: number;
     };
+    /** Epoch-ms when this result was received — newer manual/bulk results
+     * win display precedence over older ones (previously manual probes
+     * pinned stale verdicts over a fresh probe-all pass). */
+    receivedAt?: number;
     failure?: {
         code: string;
         message: string;

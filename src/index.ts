@@ -112,6 +112,12 @@ function buildResolver(getSection: () => unknown): UaResolver {
       | undefined
     const providers = section?.providers
     if (providers === undefined || typeof providers !== 'object') return undefined
+    let request: URL
+    try {
+      request = new URL(url)
+    } catch {
+      return undefined
+    }
     let best: { base: string; ua: string } | undefined
     for (const profile of Object.values(providers)) {
       if (profile === null || typeof profile !== 'object') continue
@@ -121,7 +127,15 @@ function buildResolver(getSection: () => unknown): UaResolver {
       if (typeof raw !== 'string') continue
       const ua = raw.trim()
       if (ua.length === 0) continue
-      if (!url.startsWith(base)) continue
+      let configured: URL
+      try {
+        configured = new URL(base)
+      } catch {
+        continue
+      }
+      const basePath = configured.pathname.replace(/\/+$/, '') || '/'
+      const pathMatches = request.pathname === basePath || request.pathname.startsWith(`${basePath}/`)
+      if (request.origin !== configured.origin || !pathMatches) continue
       if (best === undefined || base.length > best.base.length) best = { base, ua }
     }
     return best?.ua
@@ -195,7 +209,21 @@ function reasonText(reason: unknown): string {
 
 /* ----------------------------------------------------------- wire-level probes */
 
-/** Discovery cache — one GET /v1/models per baseURL per 60s window. */
+/**
+ * Serializes every plugin-issued whole-array mutate (auto-fill, probe
+ * backfill/compat, image sync) so two plugin writers can never interleave
+ * read-modify-write cycles against each other. External writers (the user,
+ * other plugins) remain last-writer-wins — the settings face exposes no
+ * expected-revision parameter — but plugin-internal clobbering is gone.
+ */
+let writeChain: Promise<unknown> = Promise.resolve()
+function enqueueWrite<T>(run: () => Promise<T>): Promise<T> {
+  const next = writeChain.then(run, run)
+  writeChain = next.catch(() => undefined)
+  return next
+}
+
+/** Discovery cache — one GET /v1/models per baseURL+credential per 60s window. */
 const discoveryCache = new Map<string, { at: number; list: Array<{ id: string; contextWindow?: number; maxTokens?: number }> }>()
 
 /** One minimal OpenAI-completions wire POST result. */
@@ -227,7 +255,12 @@ async function wirePost(
   baseURL: string,
   apiKey: string | undefined,
   body: Record<string, unknown>,
+  parentSignal?: AbortSignal,
 ): Promise<WireProbe> {
+  const timeoutSignal = AbortSignal.timeout(10000)
+  const signal = parentSignal === undefined
+    ? timeoutSignal
+    : AbortSignal.any([parentSignal, timeoutSignal])
   const url = `${baseURL.replace(/\/+$/, '')}/chat/completions`
   try {
     const response = await fetch(url, {
@@ -239,8 +272,8 @@ async function wirePost(
       body: JSON.stringify(body),
       // 10s per wire request: a healthy relay answers in 2-3s; anything
       // slower is treated as refused so the whole probe stays inside the
-      // client's 60s wait cap even when several requests stall.
-      signal: AbortSignal.timeout(10000),
+      // client's wait cap even when several requests stall.
+      signal,
     })
     const text = await response.text().catch(() => '')
     return { status: response.status, ok: response.ok, body: text.slice(0, 400) }
@@ -268,12 +301,22 @@ async function wirePost(
  * Everything lands in ONE models-array mutate (backfill + compat) before
  * the stream, so results can never clobber each other.
  */
+/** Liveness + cancellation handed to every probe run. */
+interface ProbeControl {
+  /** Aborted on the 100s budget guard, disposal, or a newer probe. */
+  signal: AbortSignal
+  /** False once this probe generation is superseded or the plugin disposed —
+   * every settings write and the final result publication check it first. */
+  isCurrent: () => boolean
+}
+
 async function runFullProbe(
   ctx: Context,
   provider: string,
   profile: Record<string, unknown> | undefined,
   baseURL: string | undefined,
   model: string,
+  control: ProbeControl = { signal: new AbortController().signal, isCurrent: () => true },
 ): Promise<Record<string, unknown>> {
   const startedAt = Date.now()
   const llm = (ctx as unknown as { get(key: string): unknown }).get('llm') as
@@ -286,26 +329,32 @@ async function runFullProbe(
     return { ok: false, mode: 'full', error: 'LLM runtime not available' }
   }
 
-  // 1. Discovery — declared capacity listing. Raced with a 10s cap so a
-  // hanging listing request cannot extend the probe without bound, and
-  // cached per baseURL for 60s: a "probe all" pass over N models would
-  // otherwise re-fetch the same listing N times in quick succession.
+  // 1. Discovery — declared capacity listing. Raced with a 10s cap that
+  // ABORTS the underlying request (not just the wait), and cached per
+  // baseURL+credential for 60s: a "probe all" pass over N models would
+  // otherwise re-fetch the same listing N times in quick succession, and
+  // two routes sharing an endpoint with different credentials must not
+  // share one listing.
   let discovered: Array<{ id: string; contextWindow?: number; maxTokens?: number }> = []
   let discoveryError: string | undefined
   if (typeof llm.discoverModels === 'function' && baseURL !== undefined) {
-    const cacheKey = baseURL
+    const cacheKey = `${baseURL}\n${typeof profile?.apiKeyEnv === 'string' ? profile.apiKeyEnv : ''}`
     const cached = discoveryCache.get(cacheKey)
     if (cached !== undefined && Date.now() - cached.at < 60000) {
       discovered = cached.list
     } else {
+      const controller = new AbortController()
+      const onParentAbort = () => controller.abort()
+      control.signal.addEventListener('abort', onParentAbort, { once: true })
+      const timer = setTimeout(() => controller.abort(), 10000)
       try {
-        discovered = await Promise.race([
-          llm.discoverModels('llm-pi-ai', { provider, baseURL }),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('discovery timed out (10s)')), 10000)),
-        ])
+        discovered = await llm.discoverModels('llm-pi-ai', { provider, baseURL }, controller.signal)
         discoveryCache.set(cacheKey, { at: Date.now(), list: discovered })
       } catch (error) {
         discoveryError = error instanceof Error ? error.message : String(error)
+      } finally {
+        clearTimeout(timer)
+        control.signal.removeEventListener('abort', onParentAbort)
       }
     }
   }
@@ -340,7 +389,7 @@ async function runFullProbe(
         // 4, not 1: GLM-style relays reject max_tokens <= 2 outright
         // ("max_tokens must be greater than 2").
         max_tokens: 4,
-      })
+      }, control.signal)
     // Baseline: a plain user message must pass or the rest is meaningless.
     // One retry for an ambiguous failure (transient relay stall) — but a
     // credential-pool cooldown has a reset measured in hours; retrying
@@ -359,12 +408,14 @@ async function runFullProbe(
           : 'gateway did not respond within 10s (retried once) — relay hung or gateway down')
         : `baseline ${baseline.status}: ${baseline.body}`
     } else {
-      // Role admission. A 4xx refusal counts against developer directly;
-      // a 5xx is ALSO treated as a candidate refusal when `system` passes —
-      // measured on the live gateway: it wraps upstream 4xx refusals
-      // (GLM 1214 角色信息不正确) in 500s. The system cross-check keeps
-      // genuine upstream outages from writing a bogus compat fix (system
-      // would fail too, → 'failed', nothing written).
+      // Role admission. Only evidence SPECIFIC to role handling writes a
+      // compat fix: an explicit role-shaped error message (GLM 1214
+      // 角色信息不正确, "developer role", "role.*not support*"), or a 400/422
+      // whose body names roles. 401/403/404/quota/5xx are NOT role
+      // evidence — they previously produced persistent bogus
+      // `supportsDeveloperRole: false` writes for auth/quota failures.
+      // A gateway-wrapped 5xx with a role-named body still counts; a bare
+      // 5xx does not (inconclusive → untouched).
       const compat = (entry!.compat ?? {}) as Record<string, unknown>
       if (compat.supportsDeveloperRole === false) {
         roleFix = 'already'
@@ -372,11 +423,17 @@ async function runFullProbe(
         const dev = await send('developer')
         if (dev.ok) {
           roleFix = 'admitted'
-        } else if (dev.status >= 400 && dev.status !== 429) {
-          const sys = await send('system')
-          roleFix = sys.ok ? 'fixed' : 'failed'
+        } else if (dev.status === 400 || dev.status === 422 || dev.status >= 500) {
+          const roleShaped =
+            /role|角色|1214/i.test(dev.body) &&
+            !/quota|insufficient|unauthorized|forbidden|not_found|no such model|api key|billing/i.test(dev.body)
+          if (roleShaped) {
+            const sys = await send('system')
+            roleFix = sys.ok ? 'fixed' : 'failed'
+          }
+          // else: 4xx/5xx without role-named body — inconclusive, untouched.
         }
-        // else: ambiguous developer result (timeout/0) — leave the compat untouched.
+        // else: ambiguous (timeout/0, 429, other 4xx) — untouched.
       }
     }
   }
@@ -421,15 +478,19 @@ async function runFullProbe(
       return wrote ? next : undefined
     }
     if (settings !== undefined) {
-      const fresh = readFresh()
-      const next = fresh !== undefined ? buildNext(fresh) : undefined
-      if (next !== undefined) {
-        try {
-          await settings.mutate(NS, [{ op: 'set', path: ['providers', provider, 'models'], value: next }])
-          applied = true
-        } catch {
-          applied = false
-        }
+      try {
+        await enqueueWrite(async () => {
+          if (!control.isCurrent()) return
+          // Fresh read INSIDE the queue slot: no other plugin writer can
+          // interleave, and the freshest external edits before this slot
+          // are picked up.
+          const fresh = readFresh()
+          const next = fresh !== undefined ? buildNext(fresh) : undefined
+          if (next !== undefined) await settings.mutate(NS, [{ op: 'set', path: ['providers', provider, 'models'], value: next }])
+        })
+        applied = compatChanged || backfilled > 0
+      } catch {
+        applied = false
       }
     }
   }
@@ -472,12 +533,20 @@ async function runFullProbe(
   // failure line stays the precise baseline verdict.
   const wireDead = baselineError !== undefined
   if (!wireDead) {
+    const controller = new AbortController()
+    const onParentAbort = () => controller.abort()
+    control.signal.addEventListener('abort', onParentAbort, { once: true })
     try {
       const stream = llm.stream({
         provider,
         model,
         messages: [{ role: 'user', content }],
         maxTokens: 8,
+        // pi-ai accepts an abort signal on stream options; when the probe
+        // budget expires or a newer probe supersedes this one, the pending
+        // iterator.next() and its underlying wire request are cancelled,
+        // not merely abandoned.
+        signal: controller.signal,
       }) as AsyncIterable<ProbeChunk>
     // 30s overall budget, but a 12s first-token gate: a healthy relay
     // produces SOMETHING (reasoning delta included) in 2-3s; a model that
@@ -520,9 +589,15 @@ async function runFullProbe(
         // A clean finish is itself acceptance evidence: reasoning models can
         // burn their whole token cap on thinking and emit ZERO text deltas,
         // yet the wire accepted the request (and the image) — finish(length)
-        // proves the upstream consumed it. An error/aborted finish is not.
+        // proves the upstream consumed it. An error/aborted finish is not;
+        // when the failure names the image, it is explicit rejection evidence
+        // (some providers encode refusal as an error finish rather than a
+        // throw — previously this left imageVerdict unset forever).
         if (firstTokenMs === null && !/^(error|aborted)/.test(reason)) {
           firstTokenMs = Date.now() - startedAt
+        }
+        if (imageProbe && /^(error|aborted)/.test(reason) && /image|media|vision|multimodal/i.test(reason)) {
+          imageVerdict = 'rejected'
         }
         break
       }
@@ -532,13 +607,20 @@ async function runFullProbe(
         firstTokenMs = Date.now() - startedAt
       }
     }
-    void iterator.return?.()
-    if (imageProbe && firstTokenMs !== null) imageVerdict = 'accepted'
+    // Close the iterator deterministically and wait for the underlying
+    // teardown instead of fire-and-forget; a rejecting `return()` becomes
+    // an unhandled rejection if ignored.
+    controller.abort()
+    await iterator.return?.().catch(() => undefined)
+    if (imageProbe && firstTokenMs !== null && imageVerdict === undefined) imageVerdict = 'accepted'
   } catch (error) {
     streamError = error instanceof Error ? error.message : String(error)
-    if (imageProbe && /image|media|vision|multimodal|unsupported.*(?:content|type|image)/i.test(streamError)) {
+    if (imageProbe && imageVerdict === undefined && /image|media|vision|multimodal|unsupported.*(?:content|type|image)/i.test(streamError)) {
       imageVerdict = 'rejected'
     }
+  } finally {
+    controller.abort()
+    control.signal.removeEventListener('abort', onParentAbort)
   }
   } // end if (!wireDead)
 
@@ -550,18 +632,21 @@ async function runFullProbe(
   // combined write above); written only when the declaration disagrees
   // with the measurement; never touched when no verdict was reached.
   let imageSynced = false
-  if (imageVerdict !== undefined) {
+  if (imageVerdict !== undefined && control.isCurrent()) {
     const settings = settingsApi(ctx)
     if (settings !== undefined) {
-      const section = readSection(ctx) as
-        | { providers?: Record<string, { models?: Array<Record<string, unknown>> }> }
-        | undefined
-      const models = section?.providers?.[provider]?.models
-      if (Array.isArray(models)) {
-        const current = models.find((m) => m.id === model)
-        const declared = current !== undefined && Array.isArray(current.input) && (current.input as unknown[]).includes('image')
-        const measured = imageVerdict === 'accepted'
-        if (declared !== measured) {
+      try {
+        await enqueueWrite(async () => {
+          if (!control.isCurrent()) return
+          const section = readSection(ctx) as
+            | { providers?: Record<string, { models?: Array<Record<string, unknown>> }> }
+            | undefined
+          const models = section?.providers?.[provider]?.models
+          if (!Array.isArray(models)) return
+          const current = models.find((m) => m.id === model)
+          const declared = current !== undefined && Array.isArray(current.input) && (current.input as unknown[]).includes('image')
+          const measured = imageVerdict === 'accepted'
+          if (declared === measured) return
           const next = models.map((m) => {
             if (m.id !== model) return m
             const copy = { ...m }
@@ -581,13 +666,11 @@ async function runFullProbe(
             }
             return copy
           })
-          try {
-            await settings.mutate(NS, [{ op: 'set', path: ['providers', provider, 'models'], value: next }])
-            imageSynced = true
-          } catch {
-            // best-effort sync — the verdict is still reported
-          }
-        }
+          await settings.mutate(NS, [{ op: 'set', path: ['providers', provider, 'models'], value: next }])
+          imageSynced = true
+        })
+      } catch {
+        // best-effort sync — the verdict is still reported
       }
     }
   }
@@ -662,34 +745,51 @@ async function fillEfforts(ctx: Context): Promise<void> {
   if ((section as Record<string, unknown>)[AUTO_REASONING_FLAG] === false) return
   const providers = (section as { providers?: Record<string, RouteProfile | undefined> }).providers
   if (providers === undefined || typeof providers !== 'object') return
-  const ops: { op: 'set'; path: string[]; value: unknown }[] = []
-  for (const [route, profile] of Object.entries(providers)) {
-    if (profile === null || typeof profile !== 'object') continue
-    const declared = profile.models
-    if (!Array.isArray(declared)) continue
-    let changed = false
-    const next = declared.map((raw) => {
-      if (raw === null || typeof raw !== 'object') return raw
-      const entry = raw as ModelEntry
-      if (entry.reasoningEfforts === undefined) {
-        changed = true
-        return { ...entry, reasoningEfforts: { ...FILL_REASONING_EFFORTS } }
-      }
-      if (matchesEfforts(entry.reasoningEfforts, LEGACY_REASONING_EFFORTS)) {
-        changed = true
-        return { ...entry, reasoningEfforts: { ...FILL_REASONING_EFFORTS } }
-      }
-      return raw
-    })
-    if (!changed) continue
-    ops.push({ op: 'set', path: ['providers', route, 'models'], value: next })
-  }
-  if (ops.length === 0) return
-  try {
-    await settings.mutate(NS, ops)
-  } catch {
-    // Best-effort: the next settings/updated re-runs the scan.
-  }
+  // Read → build → write runs as ONE enqueueWrite slot: the auto-fill pass
+  // can no longer interleave its whole-array write with a concurrent probe
+  // backfill/compat/image-sync write and clobber it.
+  await enqueueWrite(async () => {
+    // Re-read inside the queue slot — an earlier queued write may have just
+    // changed the document.
+    let current: unknown
+    try {
+      current = settings.section(NS)
+    } catch {
+      return
+    }
+    if (current === null || typeof current !== 'object') return
+    if ((current as Record<string, unknown>)[AUTO_REASONING_FLAG] === false) return
+    const liveProviders = (current as { providers?: Record<string, RouteProfile | undefined> }).providers
+    if (liveProviders === undefined || typeof liveProviders !== 'object') return
+    const ops: { op: 'set'; path: string[]; value: unknown }[] = []
+    for (const [route, profile] of Object.entries(liveProviders)) {
+      if (profile === null || typeof profile !== 'object') continue
+      const declared = profile.models
+      if (!Array.isArray(declared)) continue
+      let changed = false
+      const next = declared.map((raw) => {
+        if (raw === null || typeof raw !== 'object') return raw
+        const entry = raw as ModelEntry
+        if (entry.reasoningEfforts === undefined) {
+          changed = true
+          return { ...entry, reasoningEfforts: { ...FILL_REASONING_EFFORTS } }
+        }
+        if (matchesEfforts(entry.reasoningEfforts, LEGACY_REASONING_EFFORTS)) {
+          changed = true
+          return { ...entry, reasoningEfforts: { ...FILL_REASONING_EFFORTS } }
+        }
+        return raw
+      })
+      if (!changed) continue
+      ops.push({ op: 'set', path: ['providers', route, 'models'], value: next })
+    }
+    if (ops.length === 0) return
+    try {
+      await settings.mutate(NS, ops)
+    } catch {
+      // Best-effort: the next settings/updated re-runs the scan.
+    }
+  })
 }
 
 export const name = 'dsh-provider-pro'
@@ -715,8 +815,19 @@ export function apply(ctx: Context) {
        * in arrival order. No boolean guard — a boolean swallowed requests
        * whenever a previous probe outlived the client's patience. */
       let probeChain: Promise<void> = Promise.resolve()
-      /** Last request id consumed, so a repeated settings/updated for the same
-       * request does not re-run the probe (client re-uses one request slot). */
+      /** Abort controller of the most recent probe run — aborted on
+       * disposal so a hung in-flight probe is cancelled with the plugin. */
+      let activeController: AbortController | undefined
+      /** Probe generation: bumped whenever a newer request arrives, the
+       * 100s budget trips, or the effect disposes. A superseded probe may
+       * still be running (the budget guard does not reach into
+       * runFullProbe), so every late write checks isCurrent() first and
+       * must never clobber the request/result slots of a newer probe. */
+      let generation = 0
+      /** Last request id CONSUMED. Only recorded after the result is
+       * published — a request whose write failed or whose probe was
+       * superseded stays eligible for re-delivery instead of being
+       * permanently suppressed. */
       let lastProbeId = ''
       const events = ctx as unknown as EventsLike
       const sync = () => {
@@ -744,23 +855,33 @@ export function apply(ctx: Context) {
         const { id, provider, model } = req as { id?: unknown; provider?: unknown; model?: unknown; mode?: unknown }
         if (typeof id !== 'string' || typeof provider !== 'string' || typeof model !== 'string') return
         if (id === lastProbeId) return
-        lastProbeId = id
+        // A newer request supersedes any still-running older probe: bump
+        // the generation so the old run's late writes are no-ops.
+        generation++
+        const myGeneration = generation
+        const controller = new AbortController()
+        activeController = controller
+        const isCurrent = (): boolean => !cancelled && generation === myGeneration
         probeChain = probeChain.then(async () => {
-          if (cancelled) return
+          if (cancelled || !isCurrent()) return
           const providers = ((readSection(ctx) as Record<string, unknown> | undefined)?.providers ?? {}) as Record<string, Record<string, unknown> | undefined>
           const profile = providers[provider]
           const baseURL = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
           const writeResult = async (value: Record<string, unknown>): Promise<void> => {
+            // Guard every publication: a superseded/disposed probe must not
+            // write its (stale) result or unset a NEWER request.
+            if (!isCurrent()) return
             const settings = settingsApi(ctx)
             if (settings === undefined) return
             await settings.mutate(NS, [
               { op: 'set', path: [PROBE_RESULT_FLAG], value: { ...value, id, provider, model } },
               { op: 'unset', path: [PROBE_REQ_FLAG] },
             ])
+            if (isCurrent()) lastProbeId = id
           }
           try {
             const result = await Promise.race([
-              runFullProbe(ctx, provider, profile, baseURL, model),
+              runFullProbe(ctx, provider, profile, baseURL, model, { signal: controller.signal, isCurrent }),
               new Promise<never>((_, reject) =>
                 setTimeout(() => reject(new Error('probe budget (100s) exceeded — a probe stage hung beyond every per-stage cap')), 100000)),
             ])
@@ -777,6 +898,8 @@ export function apply(ctx: Context) {
             } catch {
               // settings unavailable — client will TIMEOUT and clean the slot
             }
+          } finally {
+            controller.abort()
           }
         }).catch(() => undefined)
       }
@@ -804,6 +927,9 @@ export function apply(ctx: Context) {
       void run()
       return () => {
         cancelled = true
+        generation++
+        // Cancel any in-flight probe's stream/wire requests with the plugin.
+        activeController?.abort()
         disposer()
         state.resolver = undefined
       }

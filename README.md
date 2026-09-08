@@ -2,10 +2,10 @@
 
 [English](#english) · [中文](#中文)
 
-DeepSeek Harness 插件：为自定义供应方（`llm-pi-ai` 手动添加的 provider）补上两个 DSH 官方渠道才有的能力，开箱即用、零逐模型配置。
+DeepSeek Harness 插件：为自定义供应方（`llm-pi-ai` 手动添加的 provider）补上 DSH 官方渠道才有的能力，开箱即用、零逐模型配置。
 
 A DeepSeek Harness plugin that gives custom providers (hand-added via the
-`llm-pi-ai` provider) two capabilities that official channels already have —
+`llm-pi-ai` provider) four capabilities official channels already have —
 out of the box, with no per-model configuration.
 
 > **兼容性**：需要 **DSH Desktop 2.0+**（客户端 RPC 走 `ctx.remote.settings`）。
@@ -54,11 +54,11 @@ out of the box, with no per-model configuration.
 
 ```sh
 # 方式一：git 安装（需要一次构建许可，见下）
-dsh plugin --profile web add github:Mortal520/dsh-provider-pro
+dsh plugin --profile desktop add github:Mortal520/dsh-provider-pro
 
 # 方式二：本地仓库 / tarball（免构建许可）
-dsh plugin --profile web add ./dsh-provider-pro
-dsh plugin --profile web add ./dsh-provider-pro-0.3.0.tgz   # 先 pnpm pack
+dsh plugin --profile desktop add ./dsh-provider-pro
+dsh plugin --profile desktop add ./dsh-provider-pro-0.5.1.tgz   # 先 pnpm pack
 ```
 
 > git 安装注意：pnpm ≥10 默认拒绝运行 git 依赖的构建脚本。首次 `add` 报错时，
@@ -72,7 +72,7 @@ dsh plugin --profile web add ./dsh-provider-pro-0.3.0.tgz   # 先 pnpm pack
 >
 > 为避免该步骤，本仓库**已提交构建产物 `lib/`**，也可直接用 tarball/本地路径安装。
 
-安装后**重启 dsh web** 生效。
+安装后**重启 dsh web（DSH Desktop 需重启应用）**生效。
 
 ### 用法（设置 → 模型增强）
 
@@ -110,10 +110,15 @@ dsh plugin --profile web add ./dsh-provider-pro-0.3.0.tgz   # 先 pnpm pack
 ```sh
 pnpm install
 pnpm run check    # 类型检查 + 构建 + 离线产物校验
-pnpm run smoke    # Host 行为冒烟（fetch 补丁 / 补档器 / 总开关）
+pnpm run smoke    # Host 行为冒烟（fetch 补丁 / 补档器 / 总开关 / UA 边界 / 探测消费者）
+pnpm run verify   # 上面全部 + 打包（prepack）
 ```
 
 `lib/` 是发布产物，**已提交进仓库**（git 安装免重建即可用）。
+
+> 注：`check`/`smoke` 验证的是构建产物与 Host 半逻辑；不覆盖真实 profile 安装、
+> 客户端 UI 渲染或真实网关探测。修改涉及探测或写入路径后，建议对实际网关再跑一次
+> 全量探测，并重启桌面端验证设置页行为。
 
 ### 已知限制
 
@@ -169,11 +174,11 @@ pnpm run smoke    # Host 行为冒烟（fetch 补丁 / 补档器 / 总开关）
 
 ```sh
 # git install (needs one build allow, see note)
-dsh plugin --profile web add github:Mortal520/dsh-provider-pro
+dsh plugin --profile desktop add github:Mortal520/dsh-provider-pro
 
 # or a local checkout / tarball (no build permission needed)
-dsh plugin --profile web add ./dsh-provider-pro
-dsh plugin --profile web add ./dsh-provider-pro-0.3.0.tgz   # after pnpm pack
+dsh plugin --profile desktop add ./dsh-provider-pro
+dsh plugin --profile desktop add ./dsh-provider-pro-0.5.1.tgz   # after pnpm pack
 ```
 
 > git installs run the package's `prepare` script. pnpm ≥10 blocks that until
@@ -210,11 +215,18 @@ requires patching `dsh-llm-pi-ai` itself.
 ```sh
 pnpm install
 pnpm run check    # typecheck + build + offline artifact validation
-pnpm run smoke    # host smoke tests (fetch patch / filler / master switch)
+pnpm run smoke    # host smoke tests (fetch patch / filler / master switch / UA boundary / probe consumer)
+pnpm run verify   # the above plus a tarball pack (prepack)
 ```
 
 `lib/` is the build artifact and is committed, so a git install works without
 building.
+
+> Note: `check`/`smoke` validate the build output and the host-half logic;
+> they do not cover a real profile install, client-UI rendering, or a live
+> gateway probe. After changing the probe or write paths, re-run a full probe
+> against your actual gateway and restart the desktop app to verify the
+> settings page behavior.
 
 ### Known limitations
 
