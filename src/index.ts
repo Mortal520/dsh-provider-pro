@@ -156,7 +156,11 @@ function readSection(ctx: Context): unknown {
 /** The slice of the settings service the auto-fill pass needs. */
 interface SettingsLike {
   section(ns: string): unknown
-  mutate(ns: string, ops: unknown[]): Promise<unknown>
+  /** DSH 2.0.10+: descriptor list; each `{ ns, revision, ... }`. */
+  describe?(): Array<{ ns: string; revision: number; [key: string]: unknown }>
+  /** expectedRevision = undefined writes unconditionally; a mismatch throws
+   * SettingsConflict ("changed since it was read (expected revision …)"). */
+  mutate(ns: string, ops: unknown[], expectedRevision?: number): Promise<unknown>
 }
 function settingsApi(ctx: Context): SettingsLike | undefined {
   const settings = (ctx as unknown as { get(key: string): unknown }).get('settings')
@@ -164,6 +168,48 @@ function settingsApi(ctx: Context): SettingsLike | undefined {
   const api = settings as unknown as SettingsLike
   if (typeof api.section !== 'function' || typeof api.mutate !== 'function') return undefined
   return api
+}
+
+/** Current revision of our namespace, or undefined when unknown. */
+function nsRevision(settings: SettingsLike): number | undefined {
+  if (typeof settings.describe !== 'function') return undefined
+  try {
+    return settings.describe().find((entry) => entry.ns === NS)?.revision
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * CAS settings write with conflict retry. The caller's mutator rebuilds the
+ * target value from a FRESH section read inside the queue slot; we then
+ * write with the revision read at that same moment as a compare-and-set —
+ * if anything changed between the read and the write (an external editor,
+ * another plugin), the write throws SettingsConflict and we re-read +
+ * rebuild + retry. Bounded, so a pathological writer cannot loop forever.
+ */
+async function mutateSettingsCAS(
+  ctx: Context,
+  mutator: (freshSection: unknown) => { ops: unknown[] } | undefined,
+  attempts = 3,
+): Promise<boolean> {
+  const settings = settingsApi(ctx)
+  if (settings === undefined) return false
+  for (let i = 0; i < attempts; i++) {
+    const fresh = readSection(ctx)
+    if (fresh === null || fresh === undefined || typeof fresh !== 'object') return false
+    const built = mutator(fresh)
+    if (built === undefined) return false // nothing to change
+    const expected = nsRevision(settings)
+    try {
+      await settings.mutate(NS, built.ops, expected)
+      return true
+    } catch (error) {
+      // SettingsConflict: retry with a fresh read; any other error surfaces.
+      if (!(error instanceof Error) || !/changed since it was read|expected revision/i.test(error.message)) return false
+    }
+  }
+  return false
 }
 
 type ModelEntry = { reasoningEfforts?: unknown; [key: string]: unknown }
@@ -439,59 +485,46 @@ async function runFullProbe(
   }
 
   // Combined write: capacity backfill + compat fix in one models-array
-  // mutate, only when something actually changed.
+  // mutate, only when something actually changed. DSH 2.0.10's settings
+  // service exposes expectedRevision CAS, so this is a true compare-and-set:
+  // the merge runs against a fresh read, writes with that revision, and on
+  // a conflict (an external edit or another plugin wrote between read and
+  // write) re-reads and retries — no lost update. The no-change check keeps
+  // listing-only passes from touching the document at all.
   let applied = false
   let backfilled = 0
   const compatChanged = roleFix === 'fixed'
   if ((discovered.length > 0 || compatChanged) && models !== undefined) {
-    const settings = settingsApi(ctx)
-    // Lost-update mitigation: the host settings face has no expected-
-    // revision parameter, so instead of writing the stale probe snapshot
-    // the merge runs against a FRESH read taken immediately before the
-    // mutate — concurrent edits between probe start and here survive.
-    // The residual read→write window is microseconds-wide; the no-change
-    // check keeps listing-only passes from touching the document at all.
-    const readFresh = (): Array<Record<string, unknown>> | undefined => {
-      const section = readSection(ctx) as { providers?: Record<string, Record<string, unknown>> } | undefined
-      const list = section?.providers?.[provider]?.models
-      return Array.isArray(list) ? list as Array<Record<string, unknown>> : undefined
-    }
-    const buildNext = (fresh: Array<Record<string, unknown>>): Array<Record<string, unknown>> | undefined => {
-      let wrote = false
-      const next = fresh.map((m) => {
-        const disc = discovered.find((d) => d.id === m.id)
-        if (m.id !== model && disc === undefined) return m
-        const copy: Record<string, unknown> = { ...m }
-        if (disc !== undefined) {
-          if (copy.contextWindow === undefined && disc.contextWindow !== undefined) { copy.contextWindow = disc.contextWindow; wrote = true; backfilled++ }
-          if (copy.maxTokens === undefined && disc.maxTokens !== undefined) { copy.maxTokens = disc.maxTokens; wrote = true; backfilled++ }
-        }
-        if (m.id === model && compatChanged) {
-          const compat = (copy.compat ?? {}) as Record<string, unknown>
-          if (compat.supportsDeveloperRole !== false) {
-            copy.compat = { ...compat, supportsDeveloperRole: false }
-            wrote = true
-          }
-        }
-        return copy
-      })
-      return wrote ? next : undefined
-    }
-    if (settings !== undefined) {
-      try {
-        await enqueueWrite(async () => {
-          if (!control.isCurrent()) return
-          // Fresh read INSIDE the queue slot: no other plugin writer can
-          // interleave, and the freshest external edits before this slot
-          // are picked up.
-          const fresh = readFresh()
-          const next = fresh !== undefined ? buildNext(fresh) : undefined
-          if (next !== undefined) await settings.mutate(NS, [{ op: 'set', path: ['providers', provider, 'models'], value: next }])
+    try {
+      await enqueueWrite(async () => {
+        if (!control.isCurrent()) return
+        const ok = await mutateSettingsCAS(ctx, (freshSection) => {
+          const list = (freshSection as { providers?: Record<string, Record<string, unknown>> } | undefined)?.providers?.[provider]?.models
+          if (!Array.isArray(list)) return undefined
+          let wrote = false
+          const next = list.map((m) => {
+            const disc = discovered.find((d) => d.id === m.id)
+            if (m.id !== model && disc === undefined) return m
+            const copy: Record<string, unknown> = { ...m }
+            if (disc !== undefined) {
+              if (copy.contextWindow === undefined && disc.contextWindow !== undefined) { copy.contextWindow = disc.contextWindow; wrote = true; backfilled++ }
+              if (copy.maxTokens === undefined && disc.maxTokens !== undefined) { copy.maxTokens = disc.maxTokens; wrote = true; backfilled++ }
+            }
+            if (m.id === model && compatChanged) {
+              const compat = (copy.compat ?? {}) as Record<string, unknown>
+              if (compat.supportsDeveloperRole !== false) {
+                copy.compat = { ...compat, supportsDeveloperRole: false }
+                wrote = true
+              }
+            }
+            return copy
+          })
+          return wrote ? { ops: [{ op: 'set', path: ['providers', provider, 'models'], value: next }] } : undefined
         })
-        applied = compatChanged || backfilled > 0
-      } catch {
-        applied = false
-      }
+        applied = ok
+      })
+    } catch {
+      applied = false
     }
   }
   // Whether the write actually changed content — a listing-only discovery
@@ -627,26 +660,22 @@ async function runFullProbe(
   // 5. Declaration sync — the image-input checkbox is a declaration DSH
   // acts on, so a measured acceptance checks it and a measured rejection
   // clears it. Only the `image` modality is added or removed; every other
-  // declared modality (e.g. audio) survives untouched. Fresh read
-  // immediately before the mutate (lost-update mitigation, same as the
-  // combined write above); written only when the declaration disagrees
-  // with the measurement; never touched when no verdict was reached.
+  // declared modality (e.g. audio) survives untouched. CAS with conflict
+  // retry (DSH 2.0.10 revision), same as the combined write; written only
+  // when the declaration disagrees with the measurement; never touched
+  // when no verdict was reached.
   let imageSynced = false
   if (imageVerdict !== undefined && control.isCurrent()) {
-    const settings = settingsApi(ctx)
-    if (settings !== undefined) {
-      try {
-        await enqueueWrite(async () => {
-          if (!control.isCurrent()) return
-          const section = readSection(ctx) as
-            | { providers?: Record<string, { models?: Array<Record<string, unknown>> }> }
-            | undefined
-          const models = section?.providers?.[provider]?.models
-          if (!Array.isArray(models)) return
+    try {
+      await enqueueWrite(async () => {
+        if (!control.isCurrent()) return
+        const ok = await mutateSettingsCAS(ctx, (freshSection) => {
+          const models = (freshSection as { providers?: Record<string, { models?: Array<Record<string, unknown>> }> } | undefined)?.providers?.[provider]?.models
+          if (!Array.isArray(models)) return undefined
           const current = models.find((m) => m.id === model)
           const declared = current !== undefined && Array.isArray(current.input) && (current.input as unknown[]).includes('image')
           const measured = imageVerdict === 'accepted'
-          if (declared === measured) return
+          if (declared === measured) return undefined
           const next = models.map((m) => {
             if (m.id !== model) return m
             const copy = { ...m }
@@ -666,12 +695,12 @@ async function runFullProbe(
             }
             return copy
           })
-          await settings.mutate(NS, [{ op: 'set', path: ['providers', provider, 'models'], value: next }])
-          imageSynced = true
+          return { ops: [{ op: 'set', path: ['providers', provider, 'models'], value: next }] }
         })
-      } catch {
-        // best-effort sync — the verdict is still reported
-      }
+        imageSynced = ok
+      })
+    } catch {
+      // best-effort sync — the verdict is still reported
     }
   }
   const changedTotal = changed || imageSynced
@@ -735,60 +764,43 @@ async function runFullProbe(
 async function fillEfforts(ctx: Context): Promise<void> {
   const settings = settingsApi(ctx)
   if (settings === undefined) return
-  let section: unknown
-  try {
-    section = settings.section(NS)
-  } catch {
-    return
-  }
-  if (section === null || typeof section !== 'object') return
-  if ((section as Record<string, unknown>)[AUTO_REASONING_FLAG] === false) return
-  const providers = (section as { providers?: Record<string, RouteProfile | undefined> }).providers
-  if (providers === undefined || typeof providers !== 'object') return
-  // Read → build → write runs as ONE enqueueWrite slot: the auto-fill pass
-  // can no longer interleave its whole-array write with a concurrent probe
-  // backfill/compat/image-sync write and clobber it.
+  const initial = settings.section(NS)
+  if (initial === null || typeof initial !== 'object') return
+  if ((initial as Record<string, unknown>)[AUTO_REASONING_FLAG] === false) return
+  // Read → build → write runs as ONE enqueueWrite slot with CAS: the
+  // auto-fill pass can no longer interleave its whole-array write with a
+  // concurrent probe backfill/compat/image-sync write and clobber it, and
+  // a conflict with an external editor re-reads and retries.
   await enqueueWrite(async () => {
-    // Re-read inside the queue slot — an earlier queued write may have just
-    // changed the document.
-    let current: unknown
-    try {
-      current = settings.section(NS)
-    } catch {
-      return
-    }
-    if (current === null || typeof current !== 'object') return
-    if ((current as Record<string, unknown>)[AUTO_REASONING_FLAG] === false) return
-    const liveProviders = (current as { providers?: Record<string, RouteProfile | undefined> }).providers
-    if (liveProviders === undefined || typeof liveProviders !== 'object') return
-    const ops: { op: 'set'; path: string[]; value: unknown }[] = []
-    for (const [route, profile] of Object.entries(liveProviders)) {
-      if (profile === null || typeof profile !== 'object') continue
-      const declared = profile.models
-      if (!Array.isArray(declared)) continue
-      let changed = false
-      const next = declared.map((raw) => {
-        if (raw === null || typeof raw !== 'object') return raw
-        const entry = raw as ModelEntry
-        if (entry.reasoningEfforts === undefined) {
-          changed = true
-          return { ...entry, reasoningEfforts: { ...FILL_REASONING_EFFORTS } }
-        }
-        if (matchesEfforts(entry.reasoningEfforts, LEGACY_REASONING_EFFORTS)) {
-          changed = true
-          return { ...entry, reasoningEfforts: { ...FILL_REASONING_EFFORTS } }
-        }
-        return raw
-      })
-      if (!changed) continue
-      ops.push({ op: 'set', path: ['providers', route, 'models'], value: next })
-    }
-    if (ops.length === 0) return
-    try {
-      await settings.mutate(NS, ops)
-    } catch {
-      // Best-effort: the next settings/updated re-runs the scan.
-    }
+    await mutateSettingsCAS(ctx, (freshSection) => {
+      if (freshSection === null || typeof freshSection !== 'object') return undefined
+      if ((freshSection as Record<string, unknown>)[AUTO_REASONING_FLAG] === false) return undefined
+      const liveProviders = (freshSection as { providers?: Record<string, RouteProfile | undefined> }).providers
+      if (liveProviders === undefined || typeof liveProviders !== 'object') return undefined
+      const ops: { op: 'set'; path: string[]; value: unknown }[] = []
+      for (const [route, profile] of Object.entries(liveProviders)) {
+        if (profile === null || typeof profile !== 'object') continue
+        const declared = profile.models
+        if (!Array.isArray(declared)) continue
+        let changed = false
+        const next = declared.map((raw) => {
+          if (raw === null || typeof raw !== 'object') return raw
+          const entry = raw as ModelEntry
+          if (entry.reasoningEfforts === undefined) {
+            changed = true
+            return { ...entry, reasoningEfforts: { ...FILL_REASONING_EFFORTS } }
+          }
+          if (matchesEfforts(entry.reasoningEfforts, LEGACY_REASONING_EFFORTS)) {
+            changed = true
+            return { ...entry, reasoningEfforts: { ...FILL_REASONING_EFFORTS } }
+          }
+          return raw
+        })
+        if (!changed) continue
+        ops.push({ op: 'set', path: ['providers', route, 'models'], value: next })
+      }
+      return ops.length === 0 ? undefined : { ops }
+    })
   })
 }
 
@@ -880,11 +892,14 @@ export function apply(ctx: Context) {
             if (isCurrent()) lastProbeId = id
           }
           try {
+            let budget: ReturnType<typeof setTimeout> | undefined
             const result = await Promise.race([
               runFullProbe(ctx, provider, profile, baseURL, model, { signal: controller.signal, isCurrent }),
-              new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error('probe budget (100s) exceeded — a probe stage hung beyond every per-stage cap')), 100000)),
+              new Promise<never>((_, reject) => {
+                budget = setTimeout(() => reject(new Error('probe budget (100s) exceeded — a probe stage hung beyond every per-stage cap')), 100000)
+              }),
             ])
+            if (budget !== undefined) clearTimeout(budget)
             await writeResult(result)
           } catch (error) {
             // Never leave the client waiting blind: a failure (including the
@@ -899,6 +914,9 @@ export function apply(ctx: Context) {
               // settings unavailable — client will TIMEOUT and clean the slot
             }
           } finally {
+            // A stale budget timer would otherwise keep the event loop alive
+            // for the full 100s and (in tests) hang the process.
+            activeController = undefined
             controller.abort()
           }
         }).catch(() => undefined)

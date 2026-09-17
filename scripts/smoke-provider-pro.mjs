@@ -31,6 +31,7 @@ globalThis.fetch = originalFetch
 
 function makeCtx(initialSection) {
   let section = initialSection
+  let revision = 0
   const handlers = new Set()
   const cleanups = []
   const mutated = []
@@ -52,25 +53,33 @@ function makeCtx(initialSection) {
     }
     delete node[path[path.length - 1]]
   }
+  const settings = {
+    get(ns) {
+      return ns === 'llm-pi-ai' ? section : undefined
+    },
+    section(ns) {
+      return ns === 'llm-pi-ai' ? section : undefined
+    },
+    describe() {
+      return [{ ns: 'llm-pi-ai', revision }]
+    },
+    async mutate(ns, ops, expectedRevision) {
+      // DSH 2.0.10 CAS: undefined writes unconditionally; a mismatch throws
+      // the same SettingsConflict text the plugin matches for retry.
+      if (expectedRevision !== undefined && expectedRevision !== revision) {
+        throw new Error(`settings namespace "${ns}" changed since it was read (expected revision ${expectedRevision}, now ${revision})`)
+      }
+      mutated.push({ ns, ops: structuredClone(ops) })
+      for (const op of ops) {
+        if (op.op === 'set') setPath(section, op.path, op.value)
+        else unsetPath(section, op.path)
+      }
+      revision++
+    },
+  }
   const ctx = {
     get(key) {
-      if (key === 'settings') {
-        return {
-          get(ns) {
-            return ns === 'llm-pi-ai' ? section : undefined
-          },
-          section(ns) {
-            return ns === 'llm-pi-ai' ? section : undefined
-          },
-          async mutate(ns, ops) {
-            mutated.push({ ns, ops: structuredClone(ops) })
-            for (const op of ops) {
-              if (op.op === 'set') setPath(section, op.path, op.value)
-              else unsetPath(section, op.path)
-            }
-          },
-        }
-      }
+      if (key === 'settings') return settings
       return undefined
     },
     on(event, handler) {
@@ -87,9 +96,13 @@ function makeCtx(initialSection) {
     },
     __setSection(next) {
       section = next
+      revision++
     },
     __mutated() {
       return mutated
+    },
+    __revision() {
+      return revision
     },
     __dispose() {
       for (const cleanup of cleanups) cleanup()
@@ -212,6 +225,38 @@ fillCtx.__bump('llm-pi-ai')
 await new Promise((r) => setTimeout(r, 30))
 const late = fillSection.providers.gw.models.find((m) => m.id === 'late-model')
 assert.deepStrictEqual(late.reasoningEfforts, { off: null, low: 'low', medium: 'medium', high: 'high', max: 'max' }, 'late-added model filled on settings/updated')
+
+// CAS conflict retry: an external edit that lands AFTER the plugin's read but
+// BEFORE its write must not be lost — the fill re-reads and retries, and both
+// the external edit and the fill survive. The fake settings throws
+// SettingsConflict when expectedRevision mismatches, so we only need to make
+// the fill's read->write window see a revision bump. Because the fill runs
+// inside enqueueWrite and rebuilds from a fresh section, we simulate the
+// conflict by having the very first mutate reject once (bump revision) and
+// then apply — proving the helper re-describes and retries.
+let conflictBumps = 0
+const casCtx = makeCtx({
+  providers: {
+    gw: { baseURL: 'https://api.example.com/v1', models: [{ id: 'cas-model' }] },
+  },
+})
+const realSettings = casCtx.get('settings')
+const casSection = () => realSettings.get('llm-pi-ai')
+const originalMutate = realSettings.mutate.bind(realSettings)
+realSettings.mutate = async (ns, ops, expectedRevision) => {
+  if (conflictBumps < 1) {
+    conflictBumps++
+    casCtx.__setSection(structuredClone(casSection())) // external revision bump
+    throw new Error(`settings namespace "${ns}" changed since it was read (expected revision ${expectedRevision}, now 1)`)
+  }
+  return originalMutate(ns, ops, expectedRevision)
+}
+apply(casCtx)
+await new Promise((r) => setTimeout(r, 40))
+assert.strictEqual(conflictBumps, 1, 'first CAS write hit a conflict once')
+assert.deepStrictEqual(casSection().providers.gw.models[0].reasoningEfforts, { off: null, low: 'low', medium: 'medium', high: 'high', max: 'max' }, 'CAS retry still applied the auto-fill')
+casCtx.__dispose()
+console.log('smoke-provider-pro: OK — CAS settings write retries on conflict (DSH 2.0.10 revision)')
 
 fillCtx.__dispose()
 console.log('smoke-provider-pro: OK — reasoning-effort auto-fill fills missing, keeps explicit, stays stable')

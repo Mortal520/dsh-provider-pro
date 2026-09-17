@@ -9,12 +9,18 @@ A DeepSeek Harness plugin that gives custom providers (hand-added via the
 out of the box, with no per-model configuration.
 
 > **兼容性**：需要 **DSH Desktop 2.0+**（客户端 RPC 走 `ctx.remote.settings`）。
-> 已对照 DSH Desktop 2.0.4（harness `0.1.2-alpha.1`、cordis `4.0.1`）逐面核验：
-> settings 服务与 RPC、`settings.section` 槽、ModuleLoader bundle 协议、设计令牌、
-> pi-ai 推理词典语义。
+> 已对照 DSH Desktop 2.0.10（harness `0.1.2-alpha.1`、cordis `4.0.2`、
+> `dsh-llm-pi-ai` `0.1.5-rc.2`）逐面核验：settings 服务与 RPC（含
+> `expectedRevision` CAS 写）、`settings.section` 槽、ModuleLoader bundle 协议、
+> 设计令牌、pi-ai 推理词典语义、`llm.stream`/`discoverModels` 的 `signal` 透传。
+> 主机侧三处整数组写（补档 / 容量回填+compat / 图片声明）已升级为
+> **CAS + 冲突重试**（`mutate(ns, ops, expectedRevision)`）。
 > Requires **DSH Desktop 2.0+** (the client half talks to `ctx.remote.settings`);
-> verified surface-by-surface against DSH Desktop 2.0.4 (harness 0.1.2-alpha.1,
-> cordis 4.0.1).
+> verified surface-by-surface against DSH Desktop 2.0.10 (harness 0.1.2-alpha.1,
+> cordis 4.0.2, dsh-llm-pi-ai 0.1.5-rc.2) — settings service & RPC incl. the
+> `expectedRevision` CAS write, the `settings.section` slot, the ModuleLoader
+> bundle protocol, design tokens, pi-ai reasoning-effort semantics, and
+> `signal` passthrough for `llm.stream`/`discoverModels`.
 
 ---
 

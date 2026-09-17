@@ -2,6 +2,37 @@
 
 All notable changes to dsh-provider-pro.
 
+## [0.5.2] - 2026-09-09
+
+### Changed
+- **Sync to DSH Desktop 2.0.10** (cordis 4.0.2, dsh-llm-pi-ai 0.1.5-rc.2).
+  Verified surface-by-surface against the installed build: settings service
+  & RPC, `settings.section`, the bundle protocol, design tokens, pi-ai
+  reasoning-effort semantics, and `signal` passthrough for
+  `llm.stream` / `discoverModels`. No breaking drift — one upgrade taken:
+- **Host writes are now compare-and-set.** The settings service exposes
+  `expectedRevision` (`mutate(ns, ops, expectedRevision)`, undefined =
+  unconditional; mismatch throws `SettingsConflict`). The three host
+  whole-array write paths — auto-fill, capacity backfill + compat fix, and
+  image-declaration sync — re-read the namespace, write with that revision,
+  and on conflict re-read + rebuild + retry (bounded). Previously they wrote
+  unconditionally (the audit's P1 lost-update root cause); an external edit
+  or another plugin writing between read and write could be silently
+  clobbered. Now the conflict is detected and the write re-applied against
+  the fresh document. The plugin-internal `enqueueWrite` queue is retained
+  on top, so no interleaving can occur even without a revision-capable
+  settings face (older DSH 2.0.x falls back to unconditional writes).
+- **Probe budget timer is cleared** (`clearTimeout`) as soon as the 100s
+  race settles — a stale timer no longer keeps the event loop (and the
+  process, in tests) alive for the full 100s.
+
+### Smoke
+- Fake settings now models DSH 2.0.10: `describe()` returns `{ ns, revision }`
+  and `mutate` enforces the CAS with the real `SettingsConflict` text.
+- New smoke block: a CAS conflict during auto-fill (external edit lands
+  between the plugin's read and write) is retried — both edits survive.
+- All six smoke blocks pass and the process exits cleanly.
+
 ## [0.5.1] - 2026-09-08
 
 ### Added
