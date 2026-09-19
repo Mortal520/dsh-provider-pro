@@ -278,6 +278,8 @@ interface WireProbe {
   ok: boolean
   /** Truncated body text (error detail or empty on transport failure). */
   body: string
+  /** Total wall-clock ms for this wire attempt (for chained retry timing). */
+  ms?: number
 }
 
 /** Read-only credential resolution, mirroring how pi-ai resolves apiKeyEnv. */
@@ -296,14 +298,24 @@ async function resolveProviderKey(ctx: Context, apiKeyEnv: unknown): Promise<str
   }
 }
 
-/** POST one minimal chat-completions request; never throws. */
+/** POST one minimal chat-completions request; never throws.
+ * Header/body phase separation: `fetch` resolves on HEADERS, so the abort
+ * signal must only gate the header phase. A gateway that answers HTTP at
+ * all (any status, even 5xx) is ALIVE — a slow body is a live model burning
+ * tokens, not a hang. Only a transport-level silence (status 0) is the
+ * "no evidence of life" signal that justifies a fast fail and a hang
+ * verdict. */
 async function wirePost(
   baseURL: string,
   apiKey: string | undefined,
   body: Record<string, unknown>,
   parentSignal?: AbortSignal,
+  /** Header-phase budget: how long we wait for the upstream to answer HTTP
+   * before declaring it hung. Slower than the old flat 10s body budget, so
+   * models that answer headers promptly are never misread as dead. */
+  headerMs = 8000,
 ): Promise<WireProbe> {
-  const timeoutSignal = AbortSignal.timeout(10000)
+  const timeoutSignal = AbortSignal.timeout(headerMs)
   const signal = parentSignal === undefined
     ? timeoutSignal
     : AbortSignal.any([parentSignal, timeoutSignal])
@@ -316,12 +328,17 @@ async function wirePost(
         ...(apiKey === undefined ? {} : { authorization: `Bearer ${apiKey}` }),
       },
       body: JSON.stringify(body),
-      // 10s per wire request: a healthy relay answers in 2-3s; anything
-      // slower is treated as refused so the whole probe stays inside the
-      // client's wait cap even when several requests stall.
+      // Aborts the header wait; the body read below is NOT signal-gated, so
+      // a slow-but-alive body finishes naturally.
       signal,
     })
-    const text = await response.text().catch(() => '')
+    // Optional: cap the body read so a model that answers HTTP headers but
+    // never finishes the body doesn't pin the probe forever. 20s is well
+    // past any healthy first-completion latency yet bounded.
+    const text = await Promise.race([
+      response.text(),
+      new Promise<string>((resolve) => setTimeout(() => resolve(''), 20000)),
+    ]).catch(() => '')
     return { status: response.status, ok: response.ok, body: text.slice(0, 400) }
   } catch (error) {
     return { status: 0, ok: false, body: error instanceof Error ? error.message : String(error) }
@@ -414,10 +431,6 @@ async function runFullProbe(
   let roleFix: 'admitted' | 'fixed' | 'already' | 'failed' | 'skipped' = 'skipped'
   let baselineError: string | undefined
   const canWire = baseURL !== undefined && api === 'openai-completions' && entry !== undefined
-  // A genuinely refused request is a 4xx other than 429. Timeouts (0),
-  // rate limits, and upstream 5xx are AMBIGUOUS — never evidence of
-  // rejection; they get one retry.
-  const ambiguous = (probe: WireProbe): boolean => probe.status === 0 || probe.status === 429 || probe.status >= 500
   if (canWire) {
     const apiKey = await resolveProviderKey(ctx, profile?.apiKeyEnv)
     // Wire shapes mirror what pi-ai actually sends: a system-position
@@ -437,21 +450,37 @@ async function runFullProbe(
         max_tokens: 4,
       }, control.signal)
     // Baseline: a plain user message must pass or the rest is meaningless.
-    // One retry for an ambiguous failure (transient relay stall) — but a
-    // credential-pool cooldown has a reset measured in hours; retrying
-    // seconds later is pointless. A TIMEOUT abort is also not retried:
-    // an upstream that hung for 10s will not answer in the next 10, and
-    // the retry would double the cost of every hung model.
+    // Hang classification is the efficiency crux: 9/13 models in the live
+    // measurement never answered HTTP at all (status 0) — each burned the
+    // full 10s wire timeout, and the old code retried them once for 20s
+    // apiece. A transport-level silence is almost always a genuinely dead
+    // upstream (cooldown, queue wedge, backend down); a model that merely
+    // THINKS slowly answers headers promptly. So: status 0 gets ONE fast
+    // retry at half the budget (4s) — a transient scheduler stall recovers
+    // in seconds, a dead queue does not — then hard-fails. Any HTTP status
+    // (even 5xx) is authoritative evidence the upstream is alive.
     let baseline = await send('user')
-    const timedOut = baseline.status === 0 && /aborted|timed?\s*out/i.test(baseline.body)
-    if (!baseline.ok && ambiguous(baseline) && !timedOut && !baseline.body.includes('model_cooldown')) {
+    if (baseline.status === 0) {
+      // Transport silence: one quick retry at half budget, then hang verdict.
+      const retried = await wirePost(baseURL!, apiKey, {
+        model,
+        messages: [
+          { role: 'user', content: 'Reply OK' },
+          { role: 'user', content: 'Reply OK' },
+        ],
+        max_tokens: 4,
+      }, control.signal, 4000)
+      baseline = { ...retried, ms: (baseline.ms ?? 0) + (retried.ms ?? 0) }
+    } else if (!baseline.ok && (baseline.status === 429 || baseline.status >= 500)) {
+      // Transient HTTP failure (rate limit / upstream 5xx): one retry at
+      // full budget; the next scheduler tick may succeed.
       baseline = await send('user')
     }
     if (!baseline.ok) {
       baselineError = baseline.status === 0
         ? (baseline.body !== ''
           ? `unreachable: ${baseline.body}`
-          : 'gateway did not respond within 10s (retried once) — relay hung or gateway down')
+          : 'gateway did not answer HTTP within 8s (retried once at 4s) — upstream hung or cooldown')
         : `baseline ${baseline.status}: ${baseline.body}`
     } else {
       // Role admission. Only evidence SPECIFIC to role handling writes a
@@ -557,7 +586,7 @@ async function runFullProbe(
     : [{ type: 'text', text: 'Reply with OK.' }]
   let firstTokenMs: number | null = null
   let finishReason = ''
-  let imageVerdict: 'accepted' | 'rejected' | undefined
+  let imageVerdict: 'accepted' | 'rejected' | 'unsupported' | undefined
   let streamError: string | undefined
   let streamTimedOut = false
   // Efficiency gate: when the wire baseline already established the model
@@ -629,8 +658,14 @@ async function runFullProbe(
         if (firstTokenMs === null && !/^(error|aborted)/.test(reason)) {
           firstTokenMs = Date.now() - startedAt
         }
-        if (imageProbe && /^(error|aborted)/.test(reason) && /image|media|vision|multimodal/i.test(reason)) {
-          imageVerdict = 'rejected'
+        if (imageProbe && /^(error|aborted)/.test(reason)) {
+          if (/not support|does not support|unsupported|not enabled|no vision|vision.*(?:not|unavail)|multimodal.*(?:not|unavail)|without vision|non-vision/i.test(reason)) {
+            // Capability refusal: the model has no image input at all.
+            imageVerdict = 'unsupported'
+          } else if (/image|media|vision|multimodal/i.test(reason)) {
+            // Rejection: vision-capable model refused THIS image request.
+            imageVerdict = 'rejected'
+          }
         }
         break
       }
@@ -648,8 +683,14 @@ async function runFullProbe(
     if (imageProbe && firstTokenMs !== null && imageVerdict === undefined) imageVerdict = 'accepted'
   } catch (error) {
     streamError = error instanceof Error ? error.message : String(error)
-    if (imageProbe && imageVerdict === undefined && /image|media|vision|multimodal|unsupported.*(?:content|type|image)/i.test(streamError)) {
-      imageVerdict = 'rejected'
+    if (imageProbe && imageVerdict === undefined) {
+      if (/not support|does not support|unsupported|not enabled|no vision|vision.*(?:not|unavail)|multimodal.*(?:not|unavail)|without vision|non-vision/i.test(streamError)) {
+        // Capability refusal: the model has no image input at all.
+        imageVerdict = 'unsupported'
+      } else if (/image|media|vision|multimodal|unsupported.*(?:content|type|image)/i.test(streamError)) {
+        // Rejection: vision-capable model refused THIS image request.
+        imageVerdict = 'rejected'
+      }
     }
   } finally {
     controller.abort()
@@ -674,13 +715,15 @@ async function runFullProbe(
           if (!Array.isArray(models)) return undefined
           const current = models.find((m) => m.id === model)
           const declared = current !== undefined && Array.isArray(current.input) && (current.input as unknown[]).includes('image')
-          const measured = imageVerdict === 'accepted'
-          if (declared === measured) return undefined
+          // `unsupported` is ALSO a declaration fix: a non-vision model that
+          // still declares image input is misconfigured — clear it too.
+          const shouldDeclare = imageVerdict === 'accepted'
+          if (declared === shouldDeclare) return undefined
           const next = models.map((m) => {
             if (m.id !== model) return m
             const copy = { ...m }
             const existing = Array.isArray(copy.input) ? (copy.input as unknown[]).filter((v): v is string => typeof v === 'string') : undefined
-            if (measured) {
+            if (shouldDeclare) {
               // add `image`, keep whatever else was declared
               copy.input = existing !== undefined && existing.length > 0
                 ? [...new Set([...existing, 'image'])]
@@ -715,7 +758,7 @@ async function runFullProbe(
       mode: 'full',
       totalMs: Date.now() - startedAt,
       imageProbe,
-      imageSupported: imageVerdict === 'rejected' ? false : undefined,
+      imageSupported: imageVerdict === 'rejected' || imageVerdict === 'unsupported' ? false : undefined,
       imageVerdict,
       imageSynced,
       roleFix,
@@ -738,6 +781,7 @@ async function runFullProbe(
     finishReason: finishReason || 'stop',
     imageProbe,
     imageVerdict,
+    imageSupported: imageVerdict === 'rejected' || imageVerdict === 'unsupported' ? false : undefined,
     imageSynced,
     roleFix,
     applied,

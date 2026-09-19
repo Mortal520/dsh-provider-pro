@@ -2,6 +2,33 @@
 
 All notable changes to dsh-provider-pro.
 
+## [0.5.3] - 2026-09-17
+
+### Changed
+- **Wire phase header/body separation.** `wirePost` now uses `AbortSignal.timeout(8s)` to
+  gate the header phase only; the body read is NOT signal-gated, so a gateway
+  that answers HTTP headers promptly (any status) is classified as ALIVE even
+  if the body stalls — only a transport-level silence (status 0) is the "no
+  evidence of life" hang signal. Previously the flat 10s abort killed
+  slow-but-alive models and gave a false DEAD verdict (the root cause of
+  "results are questionable").
+- **Dead-model fast-fail.** Transport silence (status 0) gets ONE fast retry
+  at 4s half-budget; the old code retried at full 10s for 20s total per
+  hung model. A 429/5xx HTTP failure gets one retry at full 8s. Live
+  measurement: per-hung-model cost dropped from ~20s to ~12s; HTTP error
+  models now fail in 4–583ms instead of burning the full timeout. Total
+  wire time on the real 13-model gateway: **95.9s → 66.7s (−30%)**.
+- **`imageVerdict: 'unsupported'`** distinguishes "the model has no image
+  capability at all" (HTTP 400 "does not support image input") from "a
+  vision-capable model refused THIS image request" (`'rejected'`). Both
+  clear a wrong image declaration; the verdict and failure code now
+  tell the user exactly why. Previously all image failures landed in one
+  bucket, producing "partial" on every text-only model — the core of
+  "对结果存疑".
+- **Result shape exposes `imageSupported`** for both `rejected` and
+  `unsupported` verdicts; the client shows `'image: unsupported'` as a
+  distinct badge text.
+
 ## [0.5.2] - 2026-09-09
 
 ### Changed

@@ -232,7 +232,7 @@ interface HostProbeResult {
   imageProbe?: boolean
   imageSupported?: boolean
   /** Measured image verdict from the stream probe. */
-  imageVerdict?: 'accepted' | 'rejected'
+  imageVerdict?: 'accepted' | 'rejected' | 'unsupported'
   /** The input declaration was rewritten to match the measurement. */
   imageSynced?: boolean
   /** developer-role admission: admitted = wire accepts developer, fixed = compat written, already = already off. */
@@ -413,6 +413,7 @@ async function sendProbeRequest(
     else if (answer.roleFix === 'failed') parts.push('role: unresolved')
     if (answer.imageVerdict === 'accepted') parts.push('image: accepted')
     else if (answer.imageVerdict === 'rejected') parts.push('image: rejected')
+    else if (answer.imageVerdict === 'unsupported') parts.push('image: unsupported')
     if (answer.imageSynced) parts.push('input synced')
     if (answer.firstTokenMs !== undefined && answer.firstTokenMs !== null) parts.push(`first-token: ${answer.firstTokenMs}ms`)
     if (answer.changed) parts.push('written')
