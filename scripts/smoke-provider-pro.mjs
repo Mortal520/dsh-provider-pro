@@ -211,7 +211,7 @@ assert.deepStrictEqual(filled[3].reasoningEfforts, { off: null, low: 'low', medi
 // second scan (settings/updated for our ns) is a no-op — nothing missing anymore
 const before = writes.length
 fillCtx.__bump('llm-pi-ai')
-await new Promise((r) => setTimeout(r, 30))
+await new Promise((r) => setTimeout(r, 600))
 assert.strictEqual(fillCtx.__mutated().length, before, 'second scan writes nothing (stable)')
 
 // a non-llm-pi-ai settings/updated does not trigger a scan
@@ -222,7 +222,7 @@ assert.strictEqual(fillCtx.__mutated().length, before, 'settings/updated for ano
 // a newly added model without a dict gets filled on the next settings/updated
 fillSection.providers.gw.models.push({ id: 'late-model' })
 fillCtx.__bump('llm-pi-ai')
-await new Promise((r) => setTimeout(r, 30))
+await new Promise((r) => setTimeout(r, 600))
 const late = fillSection.providers.gw.models.find((m) => m.id === 'late-model')
 assert.deepStrictEqual(late.reasoningEfforts, { off: null, low: 'low', medium: 'medium', high: 'high', max: 'max' }, 'late-added model filled on settings/updated')
 
@@ -325,7 +325,7 @@ probeCtx.__setSection({
   dshProviderProProbe: { id: 'req-1', provider: 'gw', model: 'm1', mode: 'full' },
 })
 probeCtx.__bump('llm-pi-ai')
-await new Promise((r) => setTimeout(r, 50))
+await new Promise((r) => setTimeout(r, 600))
 const resultOps = probeWrites().flatMap((w) => w.ops).filter((op) => op.path[0] === 'dshProviderProProbeResult')
 assert.ok(resultOps.length >= 1, 'probe request consumed and a result published')
 const published = resultOps[resultOps.length - 1].value
@@ -337,7 +337,7 @@ assert.match(published.error ?? '', /LLM runtime not available/, 'failure states
 // NOT re-run: idempotent until a NEW request arrives.
 const writesBefore = probeWrites().length
 probeCtx.__bump('llm-pi-ai')
-await new Promise((r) => setTimeout(r, 50))
+await new Promise((r) => setTimeout(r, 600))
 assert.strictEqual(probeWrites().length, writesBefore, 'same request id is not re-run')
 
 // A NEW request id supersedes: the old generation is no longer current, so
@@ -347,7 +347,7 @@ probeCtx.__setSection({
   dshProviderProProbe: { id: 'req-2', provider: 'gw', model: 'm1', mode: 'full' },
 })
 probeCtx.__bump('llm-pi-ai')
-await new Promise((r) => setTimeout(r, 50))
+await new Promise((r) => setTimeout(r, 600))
 const resultOps2 = probeWrites().flatMap((w) => w.ops).filter((op) => op.path[0] === 'dshProviderProProbeResult')
 assert.strictEqual(resultOps2[resultOps2.length - 1].value.id, 'req-2', 'new request id supersedes and publishes')
 

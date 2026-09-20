@@ -2,6 +2,20 @@
 
 All notable changes to dsh-provider-pro.
 
+## [0.5.4] - 2026-09-17
+
+### Fixed
+- **settings/updated handler debounce (500ms).** The handler fired
+  `fill() + probe()` immediately on every `settings/updated` event. When the
+  user switches models, `session-controller.saveSelection()` writes settings
+  first; the plugin's `probe()` then grabs the same settings lock (up to
+  110s budget), and the next `saveSelection()` queues behind it — the
+  settings page freezes until probe completes (gray screen). The 500ms
+  debounce lets all writes in a rapid burst finish before the plugin
+  reads/writes again. `sync()` (a fast read) still runs immediately; only
+  the expensive `fill()`/`probe()` are delayed. The debounce timer is
+  cleared on disposal.
+
 ## [0.5.3] - 2026-09-17
 
 ### Changed

@@ -965,12 +965,24 @@ export function apply(ctx: Context) {
           }
         }).catch(() => undefined)
       }
+      // Debounce: 500ms quiet window before fill()+probe() fire. The handler
+      // fires on every `settings/updated`, including rapid writes from
+      // session-controller.saveSelection() on model switch. Without a
+      // debounce, probe() immediately grabs the settings lock (up to 110s
+      // budget), and the NEXT saveSelection() queues behind it — the UI
+      // freezes until probe completes. The 500ms gap lets all writes in a
+      // rapid burst finish before the plugin reads/writes again.
+      let debounceTimer: ReturnType<typeof setTimeout> | undefined
       const handler = (payload?: unknown) => {
-        // `settings/updated` also fires for other namespaces; only ours matters.
         if (typeof payload === 'string' && payload !== NS) return
-        sync()
-        void fill()
-        void probe()
+        sync() // fast read — no lock, safe to run immediately
+        if (debounceTimer !== undefined) clearTimeout(debounceTimer)
+        debounceTimer = setTimeout(() => {
+          debounceTimer = undefined
+          if (cancelled) return
+          void fill()
+          void probe()
+        }, 500)
       }
       const disposer = events.on('settings/updated', handler) as unknown as () => void
       // The namespace may not be registered yet at activation; poll briefly
@@ -992,6 +1004,8 @@ export function apply(ctx: Context) {
         generation++
         // Cancel any in-flight probe's stream/wire requests with the plugin.
         activeController?.abort()
+        // Clear pending debounce so a queued fill()+probe() never fires after disposal.
+        if (debounceTimer !== undefined) clearTimeout(debounceTimer)
         disposer()
         state.resolver = undefined
       }
