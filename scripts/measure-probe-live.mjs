@@ -141,12 +141,12 @@ async function main() {
           max_tokens: 4,
         })
         if (baseline.status === 0) {
-          // transport silence: fast retry at half budget
+          // transport silence: fast retry at 2s
           const retry = await wirePost(baseURL, apiKey, {
             model: id,
             messages: [{ role: 'user', content: 'Reply OK' }, { role: 'user', content: 'Reply OK' }],
             max_tokens: 4,
-          }, 4000)
+          }, 2000)
           baseline = { ...retry, ms: (baseline.ms ?? 0) + (retry.ms ?? 0) }
         } else if (!baseline.ok && (baseline.status === 429 || baseline.status >= 500)) {
           // transient HTTP: one retry at full budget

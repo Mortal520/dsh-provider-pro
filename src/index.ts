@@ -469,7 +469,7 @@ async function runFullProbe(
           { role: 'user', content: 'Reply OK' },
         ],
         max_tokens: 4,
-      }, control.signal, 4000)
+      }, control.signal, 2000)
       baseline = { ...retried, ms: (baseline.ms ?? 0) + (retried.ms ?? 0) }
     } else if (!baseline.ok && (baseline.status === 429 || baseline.status >= 500)) {
       // Transient HTTP failure (rate limit / upstream 5xx): one retry at
@@ -480,7 +480,7 @@ async function runFullProbe(
       baselineError = baseline.status === 0
         ? (baseline.body !== ''
           ? `unreachable: ${baseline.body}`
-          : 'gateway did not answer HTTP within 8s (retried once at 4s) — upstream hung or cooldown')
+          : 'gateway did not answer HTTP within 8s (retried once at 2s) — upstream hung or cooldown')
         : `baseline ${baseline.status}: ${baseline.body}`
     } else {
       // Role admission. Only evidence SPECIFIC to role handling writes a

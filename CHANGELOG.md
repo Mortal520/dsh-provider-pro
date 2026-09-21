@@ -2,6 +2,23 @@
 
 All notable changes to dsh-provider-pro.
 
+## [0.5.5] - 2026-09-17
+
+### Fixed
+- **INFRA false positives eliminated.** The infra-detection regex matched
+  `TLS handshake timeout`, `connection refused`, and `unexpected eof` — all
+  of which can be model-level errors (upstream timeout, cooldown), not
+  gateway infrastructure. Narrowed the regex to only match unambiguous
+  gateway infra: `lookup <host>`, `dial tcp ... <host>`, `no such host`,
+  `network is unreachable`. Model timeouts now show as `TIMEOUT` (correct)
+  instead of `INFRA` (misleading).
+- **TIMEOUT from hung-model budget overflow.** Seven hung models × 12s
+  (8s header + 4s retry) = 84s baseline + alive models = ~101s >
+  100s host budget → client TIMEOUT. Reduced the fast-retry header
+  timeout from 4s to 2s: per-hung-model cost 12s → 10s. Total serial
+  wire time on the real gateway: 95.9s → 84.6s (−12%), now within the
+  100s budget.
+
 ## [0.5.4] - 2026-09-17
 
 ### Fixed
