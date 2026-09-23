@@ -2,6 +2,22 @@
 
 All notable changes to dsh-provider-pro.
 
+## [0.5.6] - 2026-09-17
+
+### Fixed
+- **Stale lock blocks UI toggle (auto-reasoning switch).** When a probe was
+  running, its `writeResult` called `settings.mutate()` outside the
+  `enqueueWrite` queue, so a concurrent UI toggle write (e.g. switching
+  `dshProviderProAutoReasoning`) was blocked by the in-flight probe's
+  settings lock for up to 100s — the toggle appeared to not persist.
+  Two fixes:
+  1. New probe arrival now immediately `abort()`s the previous in-flight
+     probe's controller, releasing its wire connections and settings lock
+     instantly instead of waiting for the 100s budget to expire.
+  2. `writeResult` now routes through `enqueueWrite`, serializing the
+     probe's CAS write with other plugin mutations so the UI toggle is
+     never blocked by a long-running probe.
+
 ## [0.5.5] - 2026-09-17
 
 ### Fixed

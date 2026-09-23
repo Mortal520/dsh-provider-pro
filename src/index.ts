@@ -914,6 +914,11 @@ export function apply(ctx: Context) {
         // A newer request supersedes any still-running older probe: bump
         // the generation so the old run's late writes are no-ops.
         generation++
+        // Abort the previous in-flight probe immediately so its wire
+        // requests release the network connection and the settings lock
+        // fast — without this, a hung old probe blocks the UI toggle
+        // write (stale lock) for up to 100s.
+        activeController?.abort()
         const myGeneration = generation
         const controller = new AbortController()
         activeController = controller
@@ -929,10 +934,16 @@ export function apply(ctx: Context) {
             if (!isCurrent()) return
             const settings = settingsApi(ctx)
             if (settings === undefined) return
-            await settings.mutate(NS, [
-              { op: 'set', path: [PROBE_RESULT_FLAG], value: { ...value, id, provider, model } },
-              { op: 'unset', path: [PROBE_REQ_FLAG] },
-            ])
+            // Serialize through enqueueWrite so the probe's CAS write
+            // doesn't block a concurrent UI toggle (auto-reasoning switch)
+            // or other settings mutations.
+            await enqueueWrite(async () => {
+              if (!isCurrent()) return
+              await settings.mutate(NS, [
+                { op: 'set', path: [PROBE_RESULT_FLAG], value: { ...value, id, provider, model } },
+                { op: 'unset', path: [PROBE_REQ_FLAG] },
+              ])
+            })
             if (isCurrent()) lastProbeId = id
           }
           try {
