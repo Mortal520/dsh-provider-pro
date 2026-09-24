@@ -2,6 +2,53 @@
 
 All notable changes to dsh-provider-pro.
 
+## [0.5.7] - 2026-09-24
+
+### Fixed
+- **TIMEOUT flood root cause: a consumed-but-stranded probe request never
+  self-heals.** If the debounced `settings/updated` handler ever missed a
+  request (event dropped, transient read failure, unexpected throw in the
+  timer callback), the request sat in the `dshProviderProProbe` slot
+  forever and the client burned its full 110s cap showing `TIMEOUT`. The
+  host consumer is now unstrandable:
+  1. A 5s periodic recheck consumes any slot request that is neither the
+     last published id (`lastProbeId`) nor currently in flight (new
+     `activeProbeId`), so a missed event costs at most 5s instead of 110s.
+  2. The probe chain link is now fully wrapped in try/catch — ANY
+     unexpected throw publishes an error result instead of silently
+     dropping the request.
+  3. `finally` now clears `activeController`/`activeProbeId` only when
+     they still belong to THIS probe — a superseded probe can no longer
+     wipe a newer probe's controller registration.
+
+### Changed
+- **INFRA split into INFRA (gateway unreachable) vs UPSTREAM (model's
+  upstream route broken).** new-api-class gateways relay their upstreams'
+  Go errors verbatim (`dial tcp: lookup api.x.com: no such host`) inside
+  HTTP response bodies; the old classifier matched that text against the
+  WHOLE raw error and called it "网关基础设施故障" — flooding the UI with
+  gateway-infra verdicts while the gateway was actually alive and only
+  per-model upstreams were down. Now:
+  - `INFRA` — only when the plugin's own transport to the gateway failed
+    at the network level (DNS/TCP/TLS on the `unreachable:` wire errors):
+    "网关不可达（…）— 网关主机 DNS/网络故障，恢复后重试".
+  - `UPSTREAM` — gateway answered, body carries the upstream's network
+    error: "网关正常，该模型上游线路故障（…）— 模型侧问题，稍后重试此模型".
+  - Node-style transport errors (`getaddrinfo ENOTFOUND`, `ECONNREFUSED`,
+    `ECONNRESET`, …) are also recognized on the INFRA side.
+- **Hung-model error text de-cryptified.** A status-0 wire failure whose
+  body was a bare abort message ("This operation was aborted") now
+  publishes "transport silence — no HTTP response within 8s (retried once
+  at 2s); upstream hung, cooling down, or gateway overloaded" instead of
+  the cryptic raw abort text.
+
+### Added
+- **Per-stage timings published with every verdict** (`stages.baselineMs /
+  devMs / sysMs / streamMs`) and rendered in the success line
+  (`base 823ms/dev 1.2s/…`) — the user can see exactly which phase
+  consumed the wall-clock time, addressing the "对结果存疑" trust concern
+  with visible evidence.
+
 ## [0.5.6] - 2026-09-17
 
 ### Fixed

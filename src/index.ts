@@ -430,6 +430,9 @@ async function runFullProbe(
   // 2. Wire check (role admission) — openai-completions only.
   let roleFix: 'admitted' | 'fixed' | 'already' | 'failed' | 'skipped' = 'skipped'
   let baselineError: string | undefined
+  // Per-stage wall-clock timings, published with the verdict so the user
+  // can see WHERE the time went (and trust the result is evidence-based).
+  const stages: { baselineMs?: number; devMs?: number; sysMs?: number; streamMs?: number } = {}
   const canWire = baseURL !== undefined && api === 'openai-completions' && entry !== undefined
   if (canWire) {
     const apiKey = await resolveProviderKey(ctx, profile?.apiKeyEnv)
@@ -476,11 +479,14 @@ async function runFullProbe(
       // full budget; the next scheduler tick may succeed.
       baseline = await send('user')
     }
+    stages.baselineMs = baseline.ms ?? 0
     if (!baseline.ok) {
       baselineError = baseline.status === 0
-        ? (baseline.body !== ''
-          ? `unreachable: ${baseline.body}`
-          : 'gateway did not answer HTTP within 8s (retried once at 2s) — upstream hung or cooldown')
+        ? (/^(?:abort|this operation was aborted|the operation was aborted(?: due to timeout)?|timeouterror|fetch failed)?$/i.test(baseline.body.trim())
+          // Bare abort/timeout text carries zero information for the user —
+          // say what actually happened: the gateway never answered HTTP.
+          ? 'unreachable: transport silence — no HTTP response within 8s (retried once at 2s); upstream hung, cooling down, or gateway overloaded'
+          : `unreachable: ${baseline.body}`)
         : `baseline ${baseline.status}: ${baseline.body}`
     } else {
       // Role admission. Only evidence SPECIFIC to role handling writes a
@@ -496,6 +502,7 @@ async function runFullProbe(
         roleFix = 'already'
       } else {
         const dev = await send('developer')
+        stages.devMs = dev.ms ?? 0
         if (dev.ok) {
           roleFix = 'admitted'
         } else if (dev.status === 400 || dev.status === 422 || dev.status >= 500) {
@@ -504,6 +511,7 @@ async function runFullProbe(
             !/quota|insufficient|unauthorized|forbidden|not_found|no such model|api key|billing/i.test(dev.body)
           if (roleShaped) {
             const sys = await send('system')
+            stages.sysMs = sys.ms ?? 0
             roleFix = sys.ok ? 'fixed' : 'failed'
           }
           // else: 4xx/5xx without role-named body — inconclusive, untouched.
@@ -595,6 +603,7 @@ async function runFullProbe(
   // failure line stays the precise baseline verdict.
   const wireDead = baselineError !== undefined
   if (!wireDead) {
+    const streamT0 = Date.now()
     const controller = new AbortController()
     const onParentAbort = () => controller.abort()
     control.signal.addEventListener('abort', onParentAbort, { once: true })
@@ -695,6 +704,7 @@ async function runFullProbe(
   } finally {
     controller.abort()
     control.signal.removeEventListener('abort', onParentAbort)
+    stages.streamMs = Date.now() - streamT0
   }
   } // end if (!wireDead)
 
@@ -757,6 +767,7 @@ async function runFullProbe(
       ok: false,
       mode: 'full',
       totalMs: Date.now() - startedAt,
+      stages,
       imageProbe,
       imageSupported: imageVerdict === 'rejected' || imageVerdict === 'unsupported' ? false : undefined,
       imageVerdict,
@@ -777,6 +788,7 @@ async function runFullProbe(
     ok: baselineError === undefined && roleFix !== 'failed',
     mode: 'full',
     totalMs: Date.now() - startedAt,
+    stages,
     firstTokenMs,
     finishReason: finishReason || 'stop',
     imageProbe,
@@ -903,6 +915,12 @@ export function apply(ctx: Context) {
        * being silently dropped, and every run is bounded by a hard budget
        * slightly below the client's 110s wait cap — a hung stage can delay
        * the answer but can no longer turn it into a client TIMEOUT. */
+      /** Id of the request currently queued or running. A periodic recheck
+       * consumes the slot ONLY for ids that are neither the last published
+       * (lastProbeId) nor in flight (activeProbeId) — making the consumer
+       * idempotent AND unstrandable: a missed settings/updated event can no
+       * longer leave a written request sitting forever (client TIMEOUT). */
+      let activeProbeId = ''
       const probe = () => {
         if (cancelled) return
         const section = readSection(ctx) as Record<string, unknown> | undefined
@@ -910,7 +928,8 @@ export function apply(ctx: Context) {
         if (req === undefined || req === null || typeof req !== 'object') return
         const { id, provider, model } = req as { id?: unknown; provider?: unknown; model?: unknown; mode?: unknown }
         if (typeof id !== 'string' || typeof provider !== 'string' || typeof model !== 'string') return
-        if (id === lastProbeId) return
+        if (id === lastProbeId || id === activeProbeId) return
+        activeProbeId = id
         // A newer request supersedes any still-running older probe: bump
         // the generation so the old run's late writes are no-ops.
         generation++
@@ -924,10 +943,6 @@ export function apply(ctx: Context) {
         activeController = controller
         const isCurrent = (): boolean => !cancelled && generation === myGeneration
         probeChain = probeChain.then(async () => {
-          if (cancelled || !isCurrent()) return
-          const providers = ((readSection(ctx) as Record<string, unknown> | undefined)?.providers ?? {}) as Record<string, Record<string, unknown> | undefined>
-          const profile = providers[provider]
-          const baseURL = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
           const writeResult = async (value: Record<string, unknown>): Promise<void> => {
             // Guard every publication: a superseded/disposed probe must not
             // write its (stale) result or unset a NEWER request.
@@ -947,6 +962,10 @@ export function apply(ctx: Context) {
             if (isCurrent()) lastProbeId = id
           }
           try {
+            if (cancelled || !isCurrent()) return
+            const providers = ((readSection(ctx) as Record<string, unknown> | undefined)?.providers ?? {}) as Record<string, Record<string, unknown> | undefined>
+            const profile = providers[provider]
+            const baseURL = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
             let budget: ReturnType<typeof setTimeout> | undefined
             const result = await Promise.race([
               runFullProbe(ctx, provider, profile, baseURL, model, { signal: controller.signal, isCurrent }),
@@ -958,7 +977,9 @@ export function apply(ctx: Context) {
             await writeResult(result)
           } catch (error) {
             // Never leave the client waiting blind: a failure (including the
-            // budget guard itself) is published as the probe result.
+            // budget guard itself) is published as the probe result. This
+            // catch also covers ANY unexpected throw in the link body —
+            // a request can no longer be consumed and stranded silently.
             try {
               await writeResult({
                 ok: false, mode: 'full',
@@ -970,12 +991,23 @@ export function apply(ctx: Context) {
             }
           } finally {
             // A stale budget timer would otherwise keep the event loop alive
-            // for the full 100s and (in tests) hang the process.
-            activeController = undefined
+            // for the full 100s and (in tests) hang the process. Clear only
+            // OUR controller — a newer probe may have replaced it already.
+            if (activeController === controller) activeController = undefined
+            if (activeProbeId === id) activeProbeId = ''
             controller.abort()
           }
         }).catch(() => undefined)
       }
+      // Safety-net recheck: consume any request that is neither published
+      // nor in flight. If the debounced settings/updated handler ever misses
+      // (event dropped, transient read failure, callback throw), the request
+      // would otherwise sit in the slot forever and the client would show a
+      // 110s TIMEOUT. The recheck makes the consumer self-healing.
+      const recheck = setInterval(() => {
+        if (cancelled) return
+        probe()
+      }, 5000)
       // Debounce: 500ms quiet window before fill()+probe() fire. The handler
       // fires on every `settings/updated`, including rapid writes from
       // session-controller.saveSelection() on model switch. Without a
@@ -1017,6 +1049,9 @@ export function apply(ctx: Context) {
         activeController?.abort()
         // Clear pending debounce so a queued fill()+probe() never fires after disposal.
         if (debounceTimer !== undefined) clearTimeout(debounceTimer)
+        // Stop the safety-net recheck — an interval left running would keep
+        // the event loop (and tests) alive forever.
+        clearInterval(recheck)
         disposer()
         state.resolver = undefined
       }
